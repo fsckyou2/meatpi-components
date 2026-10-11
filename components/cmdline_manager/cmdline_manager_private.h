@@ -22,8 +22,9 @@
 
 /**
  * @file cmdline_manager_private.h
- * @brief Internal contracts: the PURE line assembler (host-testable)
- *        and the command-table registration hook.
+ * @brief Internal contracts: the PURE pieces (host-tested: the line
+ *        assembler and the dispatcher's verdict line), the console hook
+ *        and the settings accessors.
  */
 #pragma once
 
@@ -55,6 +56,27 @@ void cm_line_reset(cm_line_asm_t *a);
  */
 size_t cm_line_feed(cm_line_asm_t *a, const uint8_t *data, size_t len,
                     const char **out_line);
+
+/* ---- pure dispatcher verdict (cmdline_manager_line.c) -----------------------
+ * What the dispatcher owes the client after esp_console_run(), printed
+ * before the prompt on every transport. Silence = the command ran and
+ * returned 0 (its own output is the answer), or the line was empty. */
+
+/** Holds every verdict: "Unknown command: " + a 255-char line + the
+ *  "Try: help" line + NUL is 284 bytes. */
+#define CM_VERDICT_BUF 304
+
+/**
+ * Compose the verdict line for one command outcome.
+ * @param err     esp_console_run()'s return code
+ * @param ret     the handler's return value (meaningful with ESP_OK only)
+ * @param line    the command line (echoed by the unknown-command verdict)
+ * @param out     receives the NUL-terminated verdict; "" when none is owed
+ * @param out_len size of @p out (a smaller buffer truncates safely)
+ * @return bytes written, 0 when nothing is owed
+ */
+size_t cm_exec_verdict(esp_err_t err, int ret, const char *line,
+                       char *out, size_t out_len);
 
 /* ---- shared internals -------------------------------------------------------- */
 

@@ -1,9 +1,11 @@
 /**
  * @file test_main.c
- * @brief Host tests for cmdline_manager's pure line assembler: every
- *        transport chunking pattern (whole lines, split lines, CRLF,
- *        batches, oversize floods) must come out as clean lines.
- *        Expected: 6 Tests 0 Failures 0 Ignored.
+ * @brief Host tests for cmdline_manager's pure pieces: the line
+ *        assembler (every transport chunking pattern, whole lines, split
+ *        lines, CRLF, batches, oversize floods, must come out as clean
+ *        lines) and the dispatcher's verdict line (what a client is owed
+ *        after a command; issue #980: a console failure must not be
+ *        silent). Expected: 13 Tests 0 Failures 0 Ignored.
  */
 #include <string.h>
 
@@ -12,10 +14,12 @@
 #include "cmdline_manager_private.h"
 
 static cm_line_asm_t s_asm;
+static char s_verdict[CM_VERDICT_BUF];
 
 void setUp(void)
 {
     cm_line_reset(&s_asm);
+    memset(s_verdict, 'x', sizeof(s_verdict)); /* silence must write "" */
 }
 
 void tearDown(void)
@@ -113,6 +117,89 @@ static void test_overflow_discarded_then_recovers(void)
     TEST_ASSERT_EQUAL_STRING("battery", lines[0]);
 }
 
+/* ---- the dispatcher's verdict line --------------------------------------------- */
+
+static void test_verdict_success_is_silent(void)
+{
+    /* the command ran and returned 0: its own output is the answer */
+    TEST_ASSERT_EQUAL_INT(0, (int)cm_exec_verdict(ESP_OK, 0, "version",
+                                                  s_verdict,
+                                                  sizeof(s_verdict)));
+    TEST_ASSERT_EQUAL_STRING("", s_verdict);
+}
+
+static void test_verdict_empty_line_is_silent(void)
+{
+    /* esp_console_run: ESP_ERR_INVALID_ARG = whitespace only, nothing ran */
+    TEST_ASSERT_EQUAL_INT(0, (int)cm_exec_verdict(ESP_ERR_INVALID_ARG, 0,
+                                                  "  ", s_verdict,
+                                                  sizeof(s_verdict)));
+    TEST_ASSERT_EQUAL_STRING("", s_verdict);
+}
+
+static void test_verdict_unknown_command(void)
+{
+    size_t n = cm_exec_verdict(ESP_ERR_NOT_FOUND, 0, "bogus 1 2",
+                               s_verdict, sizeof(s_verdict));
+
+    TEST_ASSERT_EQUAL_STRING("Unknown command: bogus 1 2\nTry: help\n",
+                             s_verdict);
+    TEST_ASSERT_EQUAL_INT((int)strlen(s_verdict), (int)n);
+}
+
+static void test_verdict_longest_unknown_line_fits(void)
+{
+    /* the assembler's longest line (255 chars) keeps both its lines:
+     * cmdline_printf's 256-byte buffer used to cut the newline off */
+    static char line[256];
+    memset(line, 'q', sizeof(line) - 1);
+    line[sizeof(line) - 1] = '\0';
+
+    size_t n = cm_exec_verdict(ESP_ERR_NOT_FOUND, 0, line, s_verdict,
+                               sizeof(s_verdict));
+
+    TEST_ASSERT_EQUAL_INT(17 + 255 + 11, (int)n);
+    TEST_ASSERT_EQUAL_STRING("\nTry: help\n", s_verdict + 17 + 255);
+}
+
+static void test_verdict_handler_failure_names_the_code(void)
+{
+    cm_exec_verdict(ESP_OK, 3, "rtc -x", s_verdict, sizeof(s_verdict));
+    TEST_ASSERT_EQUAL_STRING("command failed (3)\n", s_verdict);
+}
+
+static void test_verdict_console_failure_is_printed(void)
+{
+    /* issue #980: esp_console_run failing on its own (no memory for the
+     * argument vector, console not initialised) printed NOTHING, so the
+     * command looked as if it had worked. The verdict names the error
+     * and says the command did not run. */
+    size_t n = cm_exec_verdict(ESP_ERR_NO_MEM, 0, "version", s_verdict,
+                               sizeof(s_verdict));
+
+    TEST_ASSERT_TRUE_MESSAGE(n > 0,
+                             "a console failure printed nothing (issue #980)");
+    TEST_ASSERT_NOT_NULL(strstr(s_verdict, "Internal error"));
+    TEST_ASSERT_NOT_NULL(strstr(s_verdict, "ESP_ERR_NO_MEM"));
+    TEST_ASSERT_NOT_NULL(strstr(s_verdict, "0x101"));
+    TEST_ASSERT_NOT_NULL(strstr(s_verdict, "did not run"));
+    TEST_ASSERT_EQUAL_CHAR('\n', s_verdict[n - 1]);
+
+    cm_exec_verdict(ESP_ERR_INVALID_STATE, 0, "version", s_verdict,
+                    sizeof(s_verdict));
+    TEST_ASSERT_NOT_NULL(strstr(s_verdict, "ESP_ERR_INVALID_STATE"));
+}
+
+static void test_verdict_truncates_to_the_buffer(void)
+{
+    char small[8];
+    size_t n = cm_exec_verdict(ESP_ERR_NOT_FOUND, 0, "bogus", small,
+                               sizeof(small));
+
+    TEST_ASSERT_EQUAL_INT(7, (int)n);
+    TEST_ASSERT_EQUAL_STRING("Unknown", small);
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
@@ -122,5 +209,12 @@ void app_main(void)
     RUN_TEST(test_batch_of_lines_one_chunk);
     RUN_TEST(test_empty_lines_skipped);
     RUN_TEST(test_overflow_discarded_then_recovers);
+    RUN_TEST(test_verdict_success_is_silent);
+    RUN_TEST(test_verdict_empty_line_is_silent);
+    RUN_TEST(test_verdict_unknown_command);
+    RUN_TEST(test_verdict_longest_unknown_line_fits);
+    RUN_TEST(test_verdict_handler_failure_names_the_code);
+    RUN_TEST(test_verdict_console_failure_is_printed);
+    RUN_TEST(test_verdict_truncates_to_the_buffer);
     UNITY_END();
 }

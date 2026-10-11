@@ -77,6 +77,18 @@ Command handlers print with `cmdline_printf()` (formatted, ≤256 bytes
 per call) or `cmdline_write()` (raw, any length: scan JSON, task
 lists).
 
+**What the dispatcher itself prints**, before the prompt and the same on
+every transport (the command's own output comes first): nothing when
+the command ran and returned 0; `command failed (N)` when the handler
+returned N (argtable's option errors go to stderr, the UART, so over a
+remote transport this line can be all a client sees); `Unknown command:
+<line>` + `Try: help` for a name the registry does not have; `Internal
+error: ESP_ERR_NO_MEM (0x101), the command did not run` when esp_console
+itself failed (no memory for the argument vector, console not
+initialised). Until 2026-10-11 that last case printed nothing and looked
+like success (issue #980). The rule is pure (`cm_exec_verdict()`,
+host-tested), and the longest unknown line keeps its newline.
+
 ## Caller contract (§2 corollary: learned the hard way)
 
 Handlers run arbitrary component code, so **every task that calls
@@ -101,8 +113,8 @@ internal stack.
 
 - `cmdline_manager.c`: lifecycle, registry + `help`, dispatcher, sink routing, endpoint trio
 - `cmdline_manager_console.c`: the UART0 linenoise console
-- `cmdline_manager_line.c`: PURE byte-stream→line assembler (host-tested)
-- `host_test/`: assembler tests (6; runs on the IDF `linux` target)
+- `cmdline_manager_line.c`: PURE pieces, host-tested: the byte-stream→line assembler and the dispatcher's verdict line
+- `host_test/`: assembler + verdict tests (13; runs on the IDF `linux` target)
 
 ## Memory (§2/§12)
 
@@ -112,7 +124,10 @@ INTERNAL (see caller contract); FreeRTOS objects internal. UART driver
 
 Live verification (2026-07-04): UART0 linenoise console (echo/editing/
 help format) and the WebSocket console via `br_cli = cli <-raw-> ws_cli`
-from rpi001, `tools/testbench/cli_ws_test.py` → `CLI WS PASS`.
+from rpi001, `tools/testbench/wifi/cli_ws_test.py` → `CLI WS PASS`
+(since 2026-10-11 it also checks the `command failed (1)` verdict, via
+`led -c` without values; the `Internal error` verdict cannot be provoked
+on a healthy device and is pinned by the host test).
 BLE async path (2026-07-10): `tools/testbench/ble_cli_wedge_test.py`
 (UB500 on rpi001, main firmware, WiFi+BLE both on), GATT reads stay at
 52 ms median while 4 s of queued commands execute; 8-line flood all

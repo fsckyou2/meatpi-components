@@ -22,8 +22,11 @@
 
 /**
  * @file cmdline_manager_line.c
- * @brief PURE byte-stream -> line assembler: no RTOS; host-testable.
+ * @brief The dispatcher's PURE pieces, no RTOS, host-tested: the
+ *        byte-stream -> line assembler, and the verdict line a client
+ *        is owed after a command.
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "cmdline_manager_private.h"
@@ -72,4 +75,50 @@ size_t cm_line_feed(cm_line_asm_t *a, const uint8_t *data, size_t len,
     }
 
     return len;
+}
+
+/* ---- the dispatcher's verdict ------------------------------------------------- */
+
+size_t cm_exec_verdict(esp_err_t err, int ret, const char *line,
+                       char *out, size_t out_len)
+{
+    int n = 0;
+
+    if (out == NULL || out_len == 0)
+    {
+        return 0;
+    }
+
+    out[0] = '\0';
+
+    if (err == ESP_ERR_NOT_FOUND)
+    {
+        n = snprintf(out, out_len, "Unknown command: %s\nTry: help\n",
+                     line != NULL ? line : "");
+    }
+    else if (err == ESP_ERR_INVALID_ARG)
+    {
+        /* an empty or whitespace-only line: nothing ran, nothing owed */
+    }
+    else if (err == ESP_OK && ret != 0)
+    {
+        n = snprintf(out, out_len, "command failed (%d)\n", ret);
+    }
+    else if (err != ESP_OK)
+    {
+        /* the console itself failed (no memory for the argument vector,
+         * not initialised): the command never ran. Until 2026-10-11 this
+         * printed nothing and looked like success (issue #980). */
+        n = snprintf(out, out_len,
+                     "Internal error: %s (0x%x), the command did not run\n",
+                     esp_err_to_name(err), (unsigned)err);
+    }
+
+    if (n <= 0)
+    {
+        out[0] = '\0';
+        return 0;
+    }
+
+    return (size_t)n < out_len ? (size_t)n : out_len - 1;
 }

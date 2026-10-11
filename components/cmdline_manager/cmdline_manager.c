@@ -159,18 +159,16 @@ esp_err_t cmdline_manager_exec_line(const char *line,
     int ret = 0;
     esp_err_t err = esp_console_run(line, &ret);
 
-    if (err == ESP_ERR_NOT_FOUND)
+    /* the verdict (an unknown command, a handler's failure code, a
+     * console failure that kept the command from running) precedes the
+     * prompt; silence means the command ran and returned 0. PSRAM slot,
+     * not the stack: exec_line is serialised by s_lock */
+    static char s_verdict[CM_VERDICT_BUF] EXT_RAM_BSS_ATTR;
+    size_t n = cm_exec_verdict(err, ret, line, s_verdict, sizeof(s_verdict));
+
+    if (n > 0)
     {
-        cmdline_printf("Unknown command: %s\n", line);
-        cmdline_printf("Try: help\n");
-    }
-    else if (err == ESP_ERR_INVALID_ARG)
-    {
-        /* empty/whitespace line: nothing ran */
-    }
-    else if (err == ESP_OK && ret != 0)
-    {
-        cmdline_printf("command failed (%d)\n", ret);
+        cmdline_write(s_verdict, n);
     }
 
     if (out != NULL)
