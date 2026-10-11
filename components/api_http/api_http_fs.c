@@ -185,8 +185,8 @@ static esp_err_t fs_info_handler(httpd_req_t *req)
         return ESP_OK; /* the refusal was sent */
     }
 
-    size_t total = 0;
-    size_t used = 0;
+    uint64_t total = 0;
+    uint64_t used = 0;
     esp_err_t err = filesystem_info(path, &total, &used);
 
     if (err != ESP_OK)
@@ -196,6 +196,9 @@ static esp_err_t fs_info_handler(httpd_req_t *req)
 
     cJSON *resp = cJSON_CreateObject();
 
+    /* a double carries the byte counts whole up to 2^53 (the 16 GB bench
+       card is 15923707904); the size_t they went through until 2026-10-11
+       wrapped a 32 GB card to 976 MB (issue #982) */
     cJSON_AddNumberToObject(resp, "total", (double)total);
     cJSON_AddNumberToObject(resp, "used", (double)used);
     return api_send_json(req, resp);

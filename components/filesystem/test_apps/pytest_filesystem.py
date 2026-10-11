@@ -44,6 +44,11 @@ def test_filesystem(dut):
     # Capacity query works against the real partition.
     dut.expect("INFO total_kib=")
 
+    # A 32 GB card's capacity survives the trip through filesystem_info()
+    # whole (issue #982: the 32-bit cast made it 1023918080 = "976.48 MB").
+    dut.expect_exact("INFO_SD err=ESP_OK total=31088689152 used=16384 "
+                     "expect_total=31088689152 expect_used=16384 ok=1")
+
     # Data survives unmount + remount.
     dut.expect_exact("REMOUNT body=deep")
 

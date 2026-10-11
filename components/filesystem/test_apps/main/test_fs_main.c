@@ -5,15 +5,60 @@
  *        firmware's partition table, Coding Standard rev 2.1 §7) and prints
  *        markers that pytest_filesystem.py asserts in order.
  */
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_vfs_fat.h"
 
 #include "filesystem.h"
 
 static const char *TAG = "fs_test";
+
+/* ---- the 32 GB card of issue #982 -------------------------------------------
+ * A FAT32 volume of 1,897,503 clusters of 16 KiB (31,088,689,152 bytes) with
+ * one cluster in use: the geometry behind the File Manager's "976.48 MB" for
+ * a 32 GB card (31,088,689,152 mod 2^32 = 1,023,918,080 bytes = 976.48 MiB,
+ * and the one cluster is its "16 KB used"). This app runs without a card, so
+ * the FATFS capacity query is wrapped at link time (-Wl,--wrap, the main
+ * CMakeLists) and answers for /sd with that volume while s_big_card is set;
+ * every other call goes to the real function. */
+#define BIG_CARD_CLUSTER_BYTES  16384ULL
+#define BIG_CARD_CLUSTERS       1897503ULL
+#define BIG_CARD_TOTAL          (BIG_CARD_CLUSTERS * BIG_CARD_CLUSTER_BYTES)
+#define BIG_CARD_USED           BIG_CARD_CLUSTER_BYTES
+
+static bool s_big_card;
+static int  s_failures;
+
+esp_err_t __real_esp_vfs_fat_info(const char *base_path,
+                                  uint64_t *out_total_bytes,
+                                  uint64_t *out_free_bytes);
+
+esp_err_t __wrap_esp_vfs_fat_info(const char *base_path,
+                                  uint64_t *out_total_bytes,
+                                  uint64_t *out_free_bytes)
+{
+    if (!s_big_card || base_path == NULL || strcmp(base_path, "/sd") != 0)
+    {
+        return __real_esp_vfs_fat_info(base_path, out_total_bytes,
+                                       out_free_bytes);
+    }
+
+    if (out_total_bytes != NULL)
+    {
+        *out_total_bytes = BIG_CARD_TOTAL;
+    }
+
+    if (out_free_bytes != NULL)
+    {
+        *out_free_bytes = BIG_CARD_TOTAL - BIG_CARD_USED;
+    }
+
+    return ESP_OK;
+}
 
 typedef struct
 {
@@ -150,12 +195,32 @@ void app_main(void)
     }
 
     /* ---- capacity ------------------------------------------------------------- */
-    size_t total = 0;
-    size_t used = 0;
+    uint64_t total = 0;
+    uint64_t used = 0;
 
     ESP_ERROR_CHECK(filesystem_info("/data", &total, &used));
     printf("INFO total_kib=%u used_ok=%d\n", (unsigned)(total / 1024),
            used > 0);
+
+    /* ---- capacity of a 32 GB card (issue #982) --------------------------------- */
+    s_big_card = true;
+    ESP_ERROR_CHECK(filesystem_sd_set_mounted(true));
+
+    uint64_t sd_total = 0;
+    uint64_t sd_used = 0;
+
+    err = filesystem_info("/sd", &sd_total, &sd_used);
+
+    bool sd_ok = (err == ESP_OK) && (sd_total == BIG_CARD_TOTAL) &&
+                 (sd_used == BIG_CARD_USED);
+
+    printf("INFO_SD err=%s total=%" PRIu64 " used=%" PRIu64
+           " expect_total=%" PRIu64 " expect_used=%" PRIu64 " ok=%d\n",
+           esp_err_to_name(err), sd_total, sd_used,
+           (uint64_t)BIG_CARD_TOTAL, (uint64_t)BIG_CARD_USED, sd_ok);
+    s_failures += sd_ok ? 0 : 1;
+    ESP_ERROR_CHECK(filesystem_sd_set_mounted(false));
+    s_big_card = false;
 
     /* ---- persistence across remount (stop -> init) ----------------------------- */
     ESP_ERROR_CHECK(filesystem_stop());
@@ -164,6 +229,15 @@ void app_main(void)
     memset(buf, 0, sizeof(buf));
     ESP_ERROR_CHECK(filesystem_read("/data/t/a/b/deep.txt", buf, sizeof(buf), &n));
     printf("REMOUNT body=%.*s\n", (int)n, buf);
+
+    if (s_failures > 0)
+    {
+        /* the capture harness waits for TEST DONE: a failed check keeps it
+           away, so the stage goes red instead of passing on "no crash" */
+        ESP_LOGE(TAG, "%d check(s) failed", s_failures);
+        printf("TEST FAILED checks=%d\n", s_failures);
+        return;
+    }
 
     ESP_LOGI(TAG, "suite finished");
     printf("TEST DONE\n");

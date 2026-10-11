@@ -40,7 +40,7 @@ Pinned design decisions (closes REVIEW.md §6.1):
 | `filesystem_mkdirs(path)` | Ensure a directory chain exists. |
 | `filesystem_list(dir, cb, ctx)` | Enumerate entries (name, is_dir, size); cb can stop early. |
 | `filesystem_open(path, mode)` | Validated `FILE*` for streaming (chunked HTTP serving). Streaming writes are **not** atomic. |
-| `filesystem_info(prefix, *total, *used)` | Backend capacity. |
+| `filesystem_info(prefix, *total, *used)` | Backend capacity in bytes, `uint64_t` (a card is bigger than 4 GiB: a 32 GB card read as 976 MB and the 16 GB bench card as 2.83 GB through a `size_t` until 2026-10-11, issue #982). |
 
 Errors: `ESP_ERR_INVALID_ARG` (bad path, wrong prefix, `..`, `//`, trailing `/`,
 ≥128 chars), `ESP_ERR_INVALID_STATE` (not inited / backend unavailable),

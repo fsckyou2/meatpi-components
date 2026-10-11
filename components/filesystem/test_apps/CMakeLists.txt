@@ -9,4 +9,8 @@ set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../..")
 # every test app.)
 set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/../../../sdkconfig.defaults;${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# Only main and what filesystem requires (littlefs, fatfs, vfs, the log,
+# settings and cmdline managers), not every component of the tree: the
+# restart_tracker app's pattern (2026-10-11, the issue #982 leg).
+idf_build_set_property(MINIMAL_BUILD ON)
 project(filesystem_test_app)

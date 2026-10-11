@@ -49,7 +49,11 @@ exists).
 ```json
 { "total": 6029312, "used": 32768 }
 ```
-Bytes. **Errors**: 400 invalid path; 503 backend unavailable.
+Bytes, whole numbers (JSON doubles carry them exactly up to 2^53; the 16 GB
+bench card answers `{ "total": 15923707904, "used": 86294528 }`). Until
+2026-10-11 the firmware passed them through a 32-bit `size_t`, so a 32 GB
+card read as 976.48 MB and the bench card as 2.83 GB (issue #982).
+**Errors**: 400 invalid path; 503 backend unavailable.
 
 ## GET /api/fs/download?path={file}
 

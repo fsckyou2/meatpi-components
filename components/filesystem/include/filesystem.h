@@ -60,6 +60,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "esp_err.h"
@@ -172,11 +173,13 @@ bool filesystem_api_hidden(const char *path);
 FILE *filesystem_open(const char *path, const char *mode);
 
 /**
- * Capacity of the backend owning @p prefix ("/data" or "/sd"). Either out
- * pointer may be NULL.
+ * Capacity of the backend owning @p prefix ("/data" or "/sd"), in bytes.
+ * Either out pointer may be NULL. 64-bit on purpose: a card is bigger than
+ * 4 GiB, and the size_t these were until 2026-10-11 wrapped a 32 GB card to
+ * 976 MB in the File Manager (issue #982).
  */
-esp_err_t filesystem_info(const char *prefix, size_t *out_total,
-                          size_t *out_used);
+esp_err_t filesystem_info(const char *prefix, uint64_t *out_total,
+                          uint64_t *out_used);
 
 /**
  * Enable/disable the /sd backend. Called by the COMPOSITION ROOT from

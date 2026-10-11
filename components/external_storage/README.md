@@ -48,8 +48,11 @@ to `ESP_ERR_INVALID_STATE`, never a crash.
 - **Host (`host_test/`, 3 tests)**: the pure detect debouncer, sub-threshold
   glitches never surface, clean insert/remove edges fire exactly once,
   seating wobble settles correctly. **Green on rpi001 2026-07-04.**
-- **Live (2026-07-04, composed main, deployed via OTA)**: real 2.8 GB card
-  mounted at boot (`sdcard_mounted` bit set), existing FAT content listed
+- **Live (2026-07-04, composed main, deployed via OTA)**: the bench card
+  mounted at boot (`sdcard_mounted` bit set; a 16 GB SanDisk SC16G,
+  `mounted /sd: SC16G 15193MB`, which this note called "a real 2.8 GB card"
+  because `/api/fs/info` said so: the 32-bit cast of issue #982 in
+  `filesystem_info()`, fixed 2026-10-11), existing FAT content listed
   via `/api/fs/list?path=/sd`, capacity via `/api/fs/info` (FATFS
   free-cluster query), upload → byte-identical download → delete on the
   card through the UI file-manager API. Hot-plug (remove/re-insert while

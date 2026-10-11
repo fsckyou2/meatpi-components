@@ -646,8 +646,8 @@ FILE *filesystem_open(const char *path, const char *mode)
     return fopen(path, mode);
 }
 
-esp_err_t filesystem_info(const char *prefix, size_t *out_total,
-                          size_t *out_used)
+esp_err_t filesystem_info(const char *prefix, uint64_t *out_total,
+                          uint64_t *out_used)
 {
     fs_backend_t backend;
     esp_err_t    err = check_path(prefix, &backend);
@@ -657,23 +657,31 @@ esp_err_t filesystem_info(const char *prefix, size_t *out_total,
         return err;
     }
 
-    size_t total = 0;
-    size_t used = 0;
+    uint64_t total = 0;
+    uint64_t used = 0;
 
     if (backend == FS_BACKEND_INTERNAL)
     {
-        err = esp_littlefs_info(CONFIG_FILESYSTEM_PARTITION_LABEL, &total,
-                                &used);
+        size_t lfs_total = 0;
+        size_t lfs_used = 0;
+
+        err = esp_littlefs_info(CONFIG_FILESYSTEM_PARTITION_LABEL,
+                                &lfs_total, &lfs_used);
+        total = lfs_total;
+        used = lfs_used;
     }
     else
     {
-        /* /sd: FATFS free-cluster query through the VFS mount */
+        /* /sd: FATFS free-cluster query through the VFS mount, kept 64-bit
+           all the way: the size_t cast that stood here wrapped a 32 GB card
+           to 976 MB and the bench's 16 GB card to 2.83 GB (issue #982,
+           2026-10-11) */
         uint64_t fat_total = 0;
         uint64_t fat_free = 0;
 
         err = esp_vfs_fat_info(FS_PREFIX_SD, &fat_total, &fat_free);
-        total = (size_t)fat_total;
-        used = (size_t)(fat_total - fat_free);
+        total = fat_total;
+        used = fat_total - fat_free;
     }
 
     if (err != ESP_OK)

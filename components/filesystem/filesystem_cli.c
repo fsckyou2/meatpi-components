@@ -32,8 +32,8 @@
 
 static void print_backend(const char *prefix)
 {
-    size_t total = 0;
-    size_t used = 0;
+    uint64_t total = 0;
+    uint64_t used = 0;
 
     if (filesystem_info(prefix, &total, &used) != ESP_OK)
     {
@@ -41,8 +41,11 @@ static void print_backend(const char *prefix)
         return;
     }
 
-    cmdline_printf("%-6s %u KB used / %u KB total\n", prefix,
-                   (unsigned)(used / 1024), (unsigned)(total / 1024));
+    /* KB in 64 bits: a card is bigger than the 4 GiB an unsigned held
+       (issue #982: the 16 GB bench card printed 2967584 KB) */
+    cmdline_printf("%-6s %llu KB used / %llu KB total\n", prefix,
+                   (unsigned long long)(used / 1024),
+                   (unsigned long long)(total / 1024));
 }
 
 static int cmd_fs(int argc, char **argv)
