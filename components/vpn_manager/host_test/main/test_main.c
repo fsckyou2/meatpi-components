@@ -3,7 +3,9 @@
  * @brief Host tests for vpn_manager's pure config checks: WireGuard
  *        key shape, endpoint sanity, the enabled-config ladder, and
  *        the tailscale validation branch.
- *        Expected output: 8 Tests 0 Failures 0 Ignored.
+ *        Since 2026-10-11 also the routes list (issue #975) and the v1
+ *        allowed_ip + mask conversion. Expected output: 10 Tests 0
+ *        Failures 0 Ignored.
  */
 #include <string.h>
 
@@ -23,8 +25,7 @@ void setUp(void)
     strcpy(s_cfg.private_key, GOOD_KEY);
     strcpy(s_cfg.peer_public_key, GOOD_KEY);
     strcpy(s_cfg.address, "10.6.0.2");
-    strcpy(s_cfg.allowed_ip, "10.6.0.0");
-    strcpy(s_cfg.allowed_ip_mask, "255.255.255.0");
+    strcpy(s_cfg.routes, "10.6.0.0/24");
     strcpy(s_cfg.endpoint, "vpn.example.com");
     s_cfg.port = 51820;
     s_cfg.keepalive_s = 25;
@@ -158,6 +159,50 @@ static void test_tailscale_rejects(void)
     TEST_ASSERT_NULL(vpn_check_config(&s_cfg));
 }
 
+static void test_routes_list_rules(void)
+{
+    char err[96];
+
+    TEST_ASSERT_TRUE(vpn_check_routes("", err, sizeof(err)));
+    TEST_ASSERT_TRUE(vpn_check_routes("10.66.0.0/24, 192.168.1.0/24", err,
+                                      sizeof(err)));
+    TEST_ASSERT_FALSE(vpn_check_routes("10.66.0.0/24, nonsense", err,
+                                       sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "nonsense"));
+    /* nine networks: one too many */
+    TEST_ASSERT_FALSE(vpn_check_routes(
+        "10.1.0.0/16 10.2.0.0/16 10.3.0.0/16 10.4.0.0/16 10.5.0.0/16 "
+        "10.6.0.0/16 10.7.0.0/16 10.8.0.0/16 10.9.0.0/16", err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "more than 8"));
+    /* the list does not make or break an enabled config */
+    s_cfg.routes[0] = '\0';
+    TEST_ASSERT_NULL(vpn_check_config(&s_cfg));
+}
+
+static void test_legacy_allowed_ip_converts(void)
+{
+    char out[24];
+
+    TEST_ASSERT_TRUE(vpn_check_legacy_route("10.66.0.0", "255.255.255.0",
+                                            out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("10.66.0.0/24", out);
+    TEST_ASSERT_TRUE(vpn_check_legacy_route("192.168.1.5", "255.255.0.0",
+                                            out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("192.168.0.0/16", out);
+    /* the 0.0.0.0 idiom (nothing but default_route), a mask with holes
+       and garbage are dropped */
+    TEST_ASSERT_FALSE(vpn_check_legacy_route("0.0.0.0", "0.0.0.0", out,
+                                             sizeof(out)));
+    TEST_ASSERT_FALSE(vpn_check_legacy_route("10.66.0.0", "0.0.0.0", out,
+                                             sizeof(out)));
+    TEST_ASSERT_FALSE(vpn_check_legacy_route("10.66.0.0", "255.0.255.0",
+                                             out, sizeof(out)));
+    TEST_ASSERT_FALSE(vpn_check_legacy_route("nonsense", "255.255.255.0",
+                                             out, sizeof(out)));
+    TEST_ASSERT_FALSE(vpn_check_legacy_route(NULL, "255.255.255.0", out,
+                                             sizeof(out)));
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
@@ -169,5 +214,7 @@ void app_main(void)
     RUN_TEST(test_enabled_config_requires_endpoint_and_address);
     RUN_TEST(test_tailscale_valid_configs);
     RUN_TEST(test_tailscale_rejects);
+    RUN_TEST(test_routes_list_rules);
+    RUN_TEST(test_legacy_allowed_ip_converts);
     UNITY_END();
 }

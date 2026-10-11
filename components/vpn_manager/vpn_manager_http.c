@@ -35,6 +35,7 @@
 
 #include "cJSON.h"
 #include "http_server_manager.h"
+#include "ip4_routes.h"
 
 #include "vpn_manager.h"
 #include "vpn_manager_private.h"
@@ -46,6 +47,7 @@ static const char *state_str(vpn_state_t st)
     switch (st)
     {
         case VPN_STATE_WAITING:    return "waiting";
+        case VPN_STATE_PAUSED:     return "paused";
         case VPN_STATE_CONNECTING: return "connecting";
         case VPN_STATE_CONNECTED:  return "connected";
         default:                   return "disabled";
@@ -72,6 +74,26 @@ static esp_err_t vpn_get_handler(httpd_req_t *req)
     cJSON_AddStringToObject(obj, "type",
                             st.tailscale ? "tailscale" : "wireguard");
     cJSON_AddStringToObject(obj, "endpoint", st.endpoint);
+    /* issue #976: the station's network and whether it pauses the VPN */
+    cJSON_AddStringToObject(obj, "network", st.network);
+    cJSON_AddBoolToObject(obj, "paused", st.paused);
+
+    if (!st.tailscale)
+    {
+        /* the split tunnel (issue #975): the networks routed into it */
+        ip4_routes_entry_t routes[VPN_MAX_ROUTES];
+        int n = ip4_routes_parse_list(vpn_settings_config()->routes, routes,
+                                      VPN_MAX_ROUTES, NULL, 0);
+        cJSON *arr = cJSON_AddArrayToObject(obj, "routes");
+
+        for (int i = 0; arr != NULL && i < n; i++)
+        {
+            char cidr[24];
+
+            ip4_routes_format(&routes[i], cidr, sizeof(cidr));
+            cJSON_AddItemToArray(arr, cJSON_CreateString(cidr));
+        }
+    }
     cJSON_AddStringToObject(obj, "ts_ip", st.ts_ip);
     cJSON_AddNumberToObject(obj, "ts_peers", st.ts_peers);
     cJSON_AddNumberToObject(obj, "connects", st.connects);

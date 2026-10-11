@@ -35,10 +35,12 @@
  * backoff. Connected state = DEV_STATUS_BIT_VPN_ENABLED + the
  * `vpn.state {connected}` event.
  *
- * Routing: only the configured allowed_ip range routes into the
- * tunnel unless `default_route` is set (default OFF, meatpi
- * 2026-07-07). Optional DNS override (saved/restored around the
- * connection, the legacy behavior).
+ * Routing: the networks listed in `routes` (CIDRs, settings v2, issue
+ * #975: handed to ip4_routes' table once the tunnel is up, so lwIP's
+ * route lookup sends only those destinations into the netif) unless
+ * `default_route` is set (default OFF, meatpi 2026-07-07: then the
+ * netif is the default one). Optional DNS override (saved/restored
+ * around the connection, the legacy behavior).
  *
  * Keys: `POST /api/vpn/keygen` generates a fresh Curve25519 pair ON
  * the device and stores the private key straight into pending
@@ -61,6 +63,9 @@ typedef enum
 {
     VPN_STATE_DISABLED = 0,  /**< disabled in settings                */
     VPN_STATE_WAITING,       /**< enabled; waiting for network/time   */
+    VPN_STATE_PAUSED,        /**< the station is on a network marked
+                                  "Pause VPN" (issue #976): the tunnel
+                                  stays down until it leaves           */
     VPN_STATE_CONNECTING,    /**< tunnel up, no verified handshake yet */
     VPN_STATE_CONNECTED,     /**< peer handshake verified             */
 } vpn_state_t;
@@ -69,6 +74,8 @@ typedef struct
 {
     vpn_state_t state;
     bool        tailscale;        /**< type: tailscale vs wireguard     */
+    bool        paused;           /**< state == VPN_STATE_PAUSED        */
+    char        network[33];      /**< the station's network ("" none)  */
     char        endpoint[64];     /**< peer host:port / control server  */
     char        ts_ip[16];        /**< tailnet 100.x address ("" none)  */
     int         ts_peers;         /**< tailnet peers visible            */

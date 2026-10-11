@@ -43,8 +43,9 @@ typedef struct
     char peer_public_key[64];
     char preshared_key[64];
     char address[32];          /* local tunnel IP, optional /cidr    */
-    char allowed_ip[32];
-    char allowed_ip_mask[32];
+    char routes[256];          /* "a.b.c.d/n, ..." through the tunnel
+                                  (v2, issue #975); "" = nothing but
+                                  default_route                      */
     char endpoint[64];
     int  port;
     int  keepalive_s;
@@ -66,6 +67,17 @@ bool vpn_check_endpoint(const char *host);
 /* full enabled-config validation; returns NULL when OK, else a static
  * human-readable reason (the settings on_validate message) */
 const char *vpn_check_config(const vpn_config_t *cfg);
+
+/* the routes list (issue #975, 2026-10-11): at most VPN_MAX_ROUTES networks
+ * in CIDR form; false with a readable reason in err (the offending token) */
+#define VPN_MAX_ROUTES 8
+bool vpn_check_routes(const char *routes, char *err, size_t err_len);
+
+/* settings v1 -> v2: the old allowed_ip + allowed_ip_mask pair as ONE route
+ * ("a.b.c.d/n"); false for the 0.0.0.0 idiom, a non-contiguous mask or
+ * a malformed pair */
+bool vpn_check_legacy_route(const char *ip, const char *mask, char *out,
+                            size_t len);
 
 /* ---- vpn_manager_wg.c: esp_wireguard glue (state task ONLY) ------------- */
 
@@ -111,4 +123,6 @@ const char *vpn_settings_endpoint(void);
 /* ---- glue ----------------------------------------------------------------- */
 
 void vpn_events_register(void);
-void vpn_events_state(bool connected);
+/** Publish `vpn.state {connected, paused, network}` (issue #976: paused
+ *  = the station is on a network marked "Pause VPN"). */
+void vpn_events_state(bool connected, bool paused, const char *network);

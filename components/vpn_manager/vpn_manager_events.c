@@ -38,26 +38,32 @@ void vpn_events_register(void)
     static const em_key_decl_t KEYS[] =
     {
         { "connected", EM_VAL_STR },
+        { "paused", EM_VAL_STR },
+        { "network", EM_VAL_STR },
     };
     static const em_source_decl_t STATE =
     {
         .source = "vpn", .name = "state",
-        .description = "WireGuard tunnel state changed; {connected} is "
-                       "\"true\" after a verified handshake, \"false\" "
-                       "on teardown",
-        .keys = KEYS, .n_keys = 1,
+        .description = "VPN tunnel state changed; {connected} is \"true\" "
+                       "after a verified handshake, \"false\" on teardown; "
+                       "{paused} is \"true\" while the station is on a "
+                       "network marked Pause VPN; {network} names the "
+                       "station's network",
+        .keys = KEYS, .n_keys = 3,
     };
 
     (void)event_manager_declare_source(&STATE);
 }
 
-void vpn_events_state(bool connected)
+void vpn_events_state(bool connected, bool paused, const char *network)
 {
     em_event_t ev = { 0 };
 
     snprintf(ev.source, sizeof(ev.source), "vpn");
     snprintf(ev.name, sizeof(ev.name), "state");
     ev.kv[0] = em_kv_str("connected", connected ? "true" : "false");
-    ev.n = 1;
+    ev.kv[1] = em_kv_str("paused", paused ? "true" : "false");
+    ev.kv[2] = em_kv_str("network", network != NULL ? network : "");
+    ev.n = 3;
     (void)event_manager_publish(&ev);
 }

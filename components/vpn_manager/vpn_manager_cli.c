@@ -36,6 +36,7 @@ static const char *state_str(vpn_state_t st)
     switch (st)
     {
         case VPN_STATE_WAITING:    return "waiting for network/time";
+        case VPN_STATE_PAUSED:     return "paused";
         case VPN_STATE_CONNECTING: return "connecting";
         case VPN_STATE_CONNECTED:  return "connected";
         default:                   return "disabled";
@@ -50,10 +51,31 @@ static int cmd_vpn(int argc, char **argv)
     (void)argv;
     (void)vpn_manager_status(&st);
 
-    cmdline_printf("vpn: %s, %s (%s)\n",
-                   st.tailscale ? "tailscale" : "wireguard",
-                   state_str(st.state),
-                   st.endpoint[0] ? st.endpoint : "no endpoint");
+    if (st.state == VPN_STATE_PAUSED)
+    {
+        /* issue #976: the station is on a network marked Pause VPN */
+        cmdline_printf("vpn: %s, paused on %s (marked Pause VPN; %s)\n",
+                       st.tailscale ? "tailscale" : "wireguard",
+                       st.network[0] ? st.network : "the station's network",
+                       st.endpoint[0] ? st.endpoint : "no endpoint");
+    }
+    else
+    {
+        cmdline_printf("vpn: %s, %s (%s)%s%s\n",
+                       st.tailscale ? "tailscale" : "wireguard",
+                       state_str(st.state),
+                       st.endpoint[0] ? st.endpoint : "no endpoint",
+                       st.network[0] ? ", station on " : "",
+                       st.network[0] ? st.network : "");
+    }
+
+    if (!st.tailscale)
+    {
+        const char *routes = vpn_settings_config()->routes;
+
+        cmdline_printf("  routes: %s\n",
+                       routes[0] ? routes : "(none; default_route only)");
+    }
 
     if (st.tailscale && st.ts_ip[0])
     {

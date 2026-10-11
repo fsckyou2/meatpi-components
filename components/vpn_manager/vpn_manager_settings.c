@@ -46,8 +46,11 @@ static const settings_field_t FIELDS[] =
     SETTINGS_STR("peer_public_key", 63, ""),
     SETTINGS_STR("preshared_key", 63, ""),
     SETTINGS_STR("address", 31, ""),
-    SETTINGS_STR("allowed_ip", 31, "0.0.0.0"),
-    SETTINGS_STR("allowed_ip_mask", 31, "0.0.0.0"),
+    /* v2 (issue #975, 2026-10-11): the networks routed through the tunnel,
+       a comma list of CIDRs (the tunnel's own network included); replaces
+       allowed_ip + allowed_ip_mask, which named ONE network through the
+       netif netmask. "" = nothing but default_route. */
+    SETTINGS_STR("routes", 255, ""),
     SETTINGS_STR("endpoint", 63, ""),
     SETTINGS_INT("port", 1, 65535, 51820),
     SETTINGS_INT("keepalive_s", 0, 3600, 25),
@@ -106,10 +109,7 @@ static void config_from_json(const cJSON *settings, vpn_config_t *cfg)
     field_str(settings, "preshared_key", cfg->preshared_key,
               sizeof(cfg->preshared_key));
     field_str(settings, "address", cfg->address, sizeof(cfg->address));
-    field_str(settings, "allowed_ip", cfg->allowed_ip,
-              sizeof(cfg->allowed_ip));
-    field_str(settings, "allowed_ip_mask", cfg->allowed_ip_mask,
-              sizeof(cfg->allowed_ip_mask));
+    field_str(settings, "routes", cfg->routes, sizeof(cfg->routes));
     field_str(settings, "endpoint", cfg->endpoint,
               sizeof(cfg->endpoint));
     item = cJSON_GetObjectItemCaseSensitive(settings, "port");
@@ -127,6 +127,17 @@ static esp_err_t on_validate(const cJSON *settings, char *err,
     vpn_config_t cfg;
 
     config_from_json(settings, &cfg);
+
+    /* the routes list, enabled or not: a bad list must not wait for the
+       day the VPN is switched on */
+    if (!vpn_check_routes(cfg.routes, err, err_len))
+    {
+        char why[96];
+
+        snprintf(why, sizeof(why), "routes: %s", err);
+        strlcpy(err, why, err_len);
+        return ESP_ERR_INVALID_ARG;
+    }
 
     const char *reason = vpn_check_config(&cfg);
 
@@ -169,16 +180,46 @@ static esp_err_t on_apply(const cJSON *settings)
     return ESP_OK;
 }
 
+/* v1 -> v2 (issue #975): ONE network through the netif netmask (allowed_ip +
+ * allowed_ip_mask) becomes the first entry of `routes`; the 0.0.0.0 idiom
+ * (nothing but default_route) becomes an empty list. The two old keys are
+ * dropped. Pure part: vpn_check_legacy_route (host-tested). */
+static esp_err_t on_migrate(uint32_t from_version, cJSON *settings)
+{
+    if (from_version < 2 && settings != NULL)
+    {
+        const cJSON *ip = cJSON_GetObjectItemCaseSensitive(settings,
+                                                           "allowed_ip");
+        const cJSON *mask = cJSON_GetObjectItemCaseSensitive(
+            settings, "allowed_ip_mask");
+        char route[24];
+
+        if (cJSON_IsString(ip) && cJSON_IsString(mask) &&
+            vpn_check_legacy_route(ip->valuestring, mask->valuestring,
+                                   route, sizeof(route)))
+        {
+            cJSON_DeleteItemFromObject(settings, "routes");
+            cJSON_AddStringToObject(settings, "routes", route);
+        }
+
+        cJSON_DeleteItemFromObject(settings, "allowed_ip");
+        cJSON_DeleteItemFromObject(settings, "allowed_ip_mask");
+    }
+
+    return ESP_OK;
+}
+
 esp_err_t vpn_settings_register(void)
 {
     static const settings_descriptor_t DESC =
     {
         .name = "vpn_manager",
-        .version = 1,
+        .version = 2, /* v2: routes (issue #975, 2026-10-11) */
         .fields = FIELDS,
         .field_count = sizeof(FIELDS) / sizeof(FIELDS[0]),
         .on_apply = on_apply,
         .on_validate = on_validate,
+        .on_migrate = on_migrate,
     };
 
     return settings_manager_register(&DESC);

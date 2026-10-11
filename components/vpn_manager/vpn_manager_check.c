@@ -26,7 +26,10 @@
  *        esp_err.h). The settings on_validate speaks through
  *        vpn_check_config so the UI gets a reason, not just a 400.
  */
+#include <stdio.h>
 #include <string.h>
+
+#include "ip4_routes.h"
 
 #include "vpn_manager_private.h"
 
@@ -148,4 +151,41 @@ const char *vpn_check_config(const vpn_config_t *cfg)
     }
 
     return NULL;
+}
+
+bool vpn_check_routes(const char *routes, char *err, size_t err_len)
+{
+    return ip4_routes_parse_list(routes, NULL, VPN_MAX_ROUTES, err, err_len)
+           >= 0;
+}
+
+bool vpn_check_legacy_route(const char *ip, const char *mask, char *out,
+                            size_t len)
+{
+    ip4_routes_entry_t a;
+    ip4_routes_entry_t m;
+
+    if (ip == NULL || mask == NULL || out == NULL || len == 0)
+    {
+        return false;
+    }
+
+    /* a bare address parses as /32: `network` then holds the value */
+    if (!ip4_routes_parse_cidr(ip, &a) || !ip4_routes_parse_cidr(mask, &m))
+    {
+        return false;
+    }
+
+    uint32_t mv = m.network;
+    uint32_t inv = ~mv;
+
+    if (a.network == 0 || mv == 0 || (inv & (inv + 1)) != 0)
+    {
+        return false; /* the 0.0.0.0 idiom, or a mask with holes */
+    }
+
+    ip4_routes_entry_t e = { .network = a.network & mv, .mask = mv };
+
+    ip4_routes_format(&e, out, len);
+    return true;
 }

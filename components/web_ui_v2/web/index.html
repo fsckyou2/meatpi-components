@@ -1139,6 +1139,7 @@ const LABELS={
   ap_ip:"AP IP address",ap_channel:"AP channel",ap_bandwidth:"AP bandwidth",ap_hidden:"Hide AP network",
   ap_max_connections:"Max AP clients",ap_auto_disable:"Turn the access point off while the station is connected",power_save:"WiFi power save",
   wifi_ram_profile:"WiFi RAM profile",wifi_static_rx:"Static RX buffers",wifi_static_tx:"Static TX buffers",wifi_cache_tx:"TX cache buffers",
+  sta_vpn_pause:"Pause VPN",
   sta_ssid:"Network name (SSID)",sta_password:"Password",sta_trusted:"Trusted network",hostname:"Hostname",
   sta_auto_reconnect:"Auto-reconnect",sta_max_retry:"Max connect retries",sta_ip_mode:"IP assignment",
   sta_static_ip:"Static IP address",sta_static_netmask:"Subnet mask",sta_static_gw:"Gateway",sta_dns:"DNS server",
@@ -1187,7 +1188,7 @@ const LABELS={
   /* vpn_manager */
   "vpn_manager.type":"VPN type",ts_auth_key:"Tailscale auth key",ts_device_name:"Tailscale device name",ts_control_url:"Control server URL",
   private_key:"Private key",peer_public_key:"Peer public key",preshared_key:"Pre-shared key",address:"Tunnel address",
-  allowed_ip:"Allowed IPs",allowed_ip_mask:"Allowed IPs mask",endpoint:"Endpoint host","vpn_manager.port":"Endpoint port",
+  routes:"Routes through the tunnel",endpoint:"Endpoint host","vpn_manager.port":"Endpoint port",
   default_route:"Route all traffic through the VPN",dns:"DNS server",
   /* j2534_server / script_engine / uds_manager */
   "j2534_server.port":"TCP port",allow_reflash:"Allow ECU flashing",allow_lan:"Expose on LAN",
@@ -1222,6 +1223,7 @@ const HELP={
   ap_password:"8 to 63 characters. Blank keeps the current password, unless it is still the factory one (@meatpi#), which must be replaced before WiFi settings can be saved.",
   ap_auto_disable:"Recommended with Access point + Station: the access point stops once the station has an IP and comes back if the station loses its network, so the WiCAN stays reachable one way or the other.",
   sta_ssid:"The WiFi network the WiCAN should join: use Scan to pick one.",
+  sta_vpn_pause:"On: the VPN stays down while WiCAN is on this network and comes back as soon as it leaves. For your home WiFi, where the VPN has nothing to add.",
   sta_password:"Leave blank to keep the stored password.",
   sta_trusted:"On an untrusted network the web UI and API are blocked over the station link; MQTT and the USB link stay up.",
   hostname:()=>"Leave blank for wican_"+((conn.info&&conn.info.device_id)||"<device id>")+".",
@@ -1251,6 +1253,7 @@ const HELP={
   role:"Host: an adapter or dongle plugs into the WiCAN. Device: the WiCAN appears as a network adapter on a PC.",
   prefer_usb_route:"Use the USB-Ethernet uplink even when WiFi is connected.",
   "vpn_manager.type":"WireGuard: point-to-point tunnel to your own server. Tailscale: zero-config mesh (needs an auth key).",
+  routes:"Destination networks that go through the tunnel, comma separated in CIDR form, e.g. 10.66.0.0/24, 192.168.1.0/24. Include the tunnel's own network. Everything else uses the normal connection; Route all traffic (under Show advanced) sends everything through the tunnel instead.",
   default_route:"Send all internet traffic through the tunnel, not only the allowed IPs.",
   allow_reflash:"Lets a connected tool write ECU firmware. Keep off unless you are flashing.",
   allow_lan:"Reachable from any network the WiCAN is on, not only its own AP / USB link.",
@@ -1316,7 +1319,7 @@ const PLACEHOLDER={
   ts_control_url:"https://controlplane.tailscale.com","espnetlink.ssid":"ESPNetLink_XXXXXX","espnetlink.host":"192.168.80.1",
   "espnetlink.device_id":"set by pairing",static_ip:"192.168.1.50",static_netmask:"255.255.255.0",static_gw:"192.168.1.1",
   sta_static_ip:"192.168.1.50",sta_static_netmask:"255.255.255.0",sta_static_gw:"192.168.1.1",sta_dns:"optional, e.g. 1.1.1.1",dns:"e.g. 1.1.1.1",
-  client_id:"optional",topic_prefix:"optional",can_filter:"7E8",can_mask:"7FF",address:"10.0.0.2",allowed_ip:"0.0.0.0",allowed_ip_mask:"0.0.0.0",
+  client_id:"optional",topic_prefix:"optional",can_filter:"7E8",can_mask:"7FF",address:"10.0.0.2",routes:"10.66.0.0/24, 192.168.1.0/24",
   udp_host:"192.168.1.10",vehicle:"No profile loaded",std_init:"ATSP6;",custom_init:"optional AT chain",specific_init:"optional AT chain",
   dtc_init:"optional AT chain",dtc_rxheader:"7E8",dtc_uds_txid:"7E0",dtc_uds_rxid:"7E8",pub_topic:"~/can/rx",sub_topic:"~/can/tx",
   ca_file:"optional",auth_password:"8+ characters",
@@ -1523,13 +1526,11 @@ function importWgConf(text,vals){
     }
   }
   if(allowed.length){
+    /* every IPv4 AllowedIPs entry becomes a route through the tunnel
+       (issue #975); 0.0.0.0/0 is the route-everything flag instead */
     const full=allowed.includes("0.0.0.0/0");
     vals.default_route=full;
-    const cidr=allowed.find(a=>a!=="0.0.0.0/0");
-    if(cidr){const[ip,bits]=cidr.split("/");vals.allowed_ip=ip;
-      if(bits!==undefined){const b=Number(bits);
-        const m=b===0?0:((0xFFFFFFFF<<(32-b))>>>0);
-        vals.allowed_ip_mask=[m>>>24,(m>>>16)&255,(m>>>8)&255,m&255].join(".");}}
+    vals.routes=allowed.filter(a=>a!=="0.0.0.0/0").join(", ");
   }
   if(!n)throw new Error("no WireGuard fields found in the file");
   return n;
@@ -1881,7 +1882,7 @@ PAGES.status=async(view)=>{
         ["Bluetooth ID",st.bluetooth_id||(st.device_id||(conn.info&&conn.info.device_id)?("WiC_"+(st.device_id||conn.info.device_id)):"-")],
         ["WiFi MAC",st.wifi_mac||(conn.info&&conn.info.mac)||"-"],
         ["MQTT",b.mqtt_connected?"Connected":"Off"],
-        ["VPN",vpn?(vpn.state||"disabled"):"-"]])),
+        ["VPN",vpn?vpnWord(vpn):"-"]])),
       card("System","cpu",kv([
         ["Firmware",st.version||"-"],
         ["Partition",st.partition||"-"],
@@ -2072,7 +2073,7 @@ function fallbackNetworks(vals,stage){
         h("div",{class:"rowflex",style:"justify-content:space-between;margin-bottom:6px"},
           h("b",{style:"font-size:12px"},"Backup network"),
           h("button",{class:"btn sm gh danger",type:"button",onclick:()=>{
-            vals[k("ssid")]="";vals[k("password")]="";vals[k("trusted")]=true;
+            vals[k("ssid")]="";vals[k("password")]="";vals[k("trusted")]=true;vals[k("vpn_pause")]=false;
             vals[k("ip_mode")]="dhcp";vals[k("static_ip")]="";vals[k("static_gw")]="";
             open.delete(i);stage();rebuild();}},ic("trash"))),
         h("div",{class:"rowflex",style:"gap:8px;flex-wrap:wrap"},
@@ -2083,7 +2084,12 @@ function fallbackNetworks(vals,stage){
             onchange:e=>{vals[k("password")]=e.target.value;stage();}}),
           h("label",{class:"rowflex",style:"gap:6px;font-size:12px;color:var(--text-2)"},
             h("input",{type:"checkbox",checked:vals[k("trusted")]!==false,
-              onchange:e=>{vals[k("trusted")]=e.target.checked;stage();}}),"trusted")),
+              onchange:e=>{vals[k("trusted")]=e.target.checked;stage();}}),"trusted"),
+          /* Pause VPN per network (issue #976, 2026-10-11): the VPN stays
+             down while the station is on this network */
+          h("label",{class:"rowflex",style:"gap:6px;font-size:12px;color:var(--text-2)",title:"The VPN stays down while WiCAN is on this network and comes back as soon as it leaves"},
+            h("input",{type:"checkbox",checked:vals[k("vpn_pause")]===true,
+              onchange:e=>{vals[k("vpn_pause")]=e.target.checked;stage();}}),"pause VPN")),
         ipRow);
     }));
     add.style.display=act.length>=5?"none":"";
@@ -3839,16 +3845,23 @@ PAGES.advanced=async(view)=>{
 };
 
 /* ---- VPN ---- */
+/* the VPN state as words (the Status page's row, the VPN page's badge);
+   paused = the station is on a network marked Pause VPN (issue #976) */
+function vpnWord(v){const s=v&&v.state;
+  return s==="connected"?"Connected":s==="paused"?("Paused on "+(v.network||"this network")):s==="waiting"?"Waiting for network":s==="connecting"?"Connecting":"Disabled";}
 PAGES.vpn=async(view)=>{
   const badge=chip("…","");
   const p=page(view,null,"VPN","WireGuard / Tailscale tunnel for secure remote access.",[badge]);
   const wrap=h("div",{style:"display:flex;flex-direction:column;gap:16px"});p.append(wrap);
   const dbgRows=h("div",{});
   async function status(){const v=await tryGet("/api/vpn");if(!v)return;
-    badge.className="chip "+(v.state==="connected"?"ok":v.state==="disabled"?"":"warn");
-    badge.replaceChildren(h("span",{class:"d"}),v.state==="connected"?"Connected":(v.state||"disabled"));
+    const paused=v.state==="paused";
+    badge.className="chip "+(v.state==="connected"?"ok":paused?"info":v.state==="disabled"?"":"warn");
+    badge.replaceChildren(h("span",{class:"d"}),(v.state==="connected"||paused)?vpnWord(v):(v.state||"disabled"));
     dbgRows.replaceChildren(kv([
       ["Type",v.type||"-"],["State",v.state||"-"],["Endpoint",(v.endpoint&&!/^:\d*$/.test(v.endpoint))?v.endpoint:"-"],
+      ["Network",v.network||"-"],
+      ["Routes",Array.isArray(v.routes)&&v.routes.length?v.routes.join(", "):"-"],
       ["Tailscale IP",v.ts_ip||"-"],["Peers",v.ts_peers],["Connects",v.connects],
       ["Failures",v.failures],["Uptime",fmt.dur(v.uptime_s)]]));}
   await status();
@@ -3856,7 +3869,7 @@ PAGES.vpn=async(view)=>{
     const vals=await api("/api/settings/vpn_manager");
     const schema=await api("/api/settings/vpn_manager/schema");
     delete vals.degraded;delete vals.pending_reboot;
-    const WG=["private_key","peer_public_key","preshared_key","address","allowed_ip","allowed_ip_mask","endpoint","port","keepalive_s","default_route","dns"];
+    const WG=["private_key","peer_public_key","preshared_key","address","routes","endpoint","port","keepalive_s","default_route","dns"];
     const TS=["ts_auth_key","ts_device_name","ts_control_url"];
     const keyOut=h("div",{class:"help mono",style:"display:none;word-break:break-all;margin-top:6px"});
     const keyRow=h("div",{class:"frow"},h("label",{},"Key Pair"),h("div",{class:"ctl"},
@@ -3879,12 +3892,23 @@ PAGES.vpn=async(view)=>{
           catch(err){toast("Import failed: "+err.message,"err");}
           e.target.value="";}})),
       h("div",{class:"help"},"Standard wg-quick file: [Interface]/[Peer] keys map onto the fields below. Tailscale needs no file: just the auth key.")));
+    /* where the VPN pauses (issue #976): the flags live with the networks
+       under Settings > WiFi (Pause VPN); this page only reports them */
+    const wifi=await tryGet("/api/settings/wifi_manager")||{};
+    const marked=[];
+    if(wifi.sta_vpn_pause&&String(wifi.sta_ssid||""))marked.push(String(wifi.sta_ssid));
+    for(const i of[1,2,3,4,5]){const s=String(wifi["fallback"+i+"_ssid"]||"");if(s&&wifi["fallback"+i+"_vpn_pause"])marked.push(s);}
+    const pauseNote=note("",[marked.length
+      ?"Pauses on "+marked.join(", ")+": the tunnel stays down while WiCAN is on "+(marked.length===1?"that network":"one of those networks")+" and comes back as soon as it leaves. Mark the networks with Pause VPN under "
+      :"Pauses on no network yet. Mark your home WiFi with Pause VPN under ",
+      h("a",{href:"#/settings/wifi"},"Settings > WiFi > Station"),"."]);
+    pauseNote.dataset.key="vpn_pause_note";
     const syncKey=()=>{const wg=vals.enabled&&vals.type!=="tailscale";
-      keyRow.style.display=wg?"":"none";impRow.style.display=wg?"":"none";};
+      keyRow.style.display=wg?"":"none";impRow.style.display=wg?"":"none";pauseNote.style.display=vals.enabled?"":"none";};
     /* ONE mode dropdown: Disabled / WireGuard / Tailscale, only the
        selected backend's fields show (meatpi 2026-07-11) */
     const rows=await settingsForm("vpn_manager",[...WG,...TS,"cli"],{values:vals,schema,onDirty:syncKey,
-      advanced:["preshared_key","allowed_ip","allowed_ip_mask","keepalive_s","default_route","dns","ts_control_url"],
+      advanced:["preshared_key","keepalive_s","default_route","dns","ts_control_url"],
       visible:st=>!st.enabled?[]:(st.type==="tailscale"?[...TS,"cli"]:[...WG,"cli"])});
     const mode=()=>vals.enabled?(vals.type==="tailscale"?"tailscale":"wireguard"):"disabled";
     const modeSel=h("select",{onchange:e=>{const v=e.target.value;
@@ -3896,7 +3920,7 @@ PAGES.vpn=async(view)=>{
       h("div",{class:"help"},"WireGuard: point-to-point tunnel to your own server. Tailscale: zero-config mesh (needs an auth key)."));
     syncKey();
     wrap.append(
-      card("VPN Settings","shield",modeRow,impRow,...rows,keyRow),
+      card("VPN Settings","shield",modeRow,impRow,...rows,keyRow,pauseNote),
       card("VPN Debug","bug",
         h("div",{class:"rowflex",style:"gap:10px;margin-bottom:6px;flex-wrap:wrap"},
           h("button",{class:"btn sm",onclick:status},ic("refresh"),"Refresh")),

@@ -43,6 +43,7 @@
 #include "dev_status_manager.h"
 #include "log_manager.h"
 #include "rtc_manager.h"
+#include "wifi_manager.h"
 
 #include "vpn_manager_private.h"
 
@@ -132,9 +133,37 @@ static bool network_up(void)
             DEV_STATUS_NETWORK_CONNECTED_MASK) != 0;
 }
 
+/* the station's network, for the status, the log lines and the event */
+static void sta_network(char *buf, size_t len)
+{
+    if (wifi_manager_get_sta_ssid(buf, len) != ESP_OK)
+    {
+        buf[0] = '\0';
+    }
+}
+
+/* "Pause VPN" (issue #976, 2026-10-11): the station is on a network the
+ * user marked under Settings > WiFi; the tunnel stays down meanwhile */
+static bool paused_here(void)
+{
+    return wifi_manager_sta_vpn_pause();
+}
+
+static void enter_paused(void)
+{
+    char net[33];
+
+    sta_network(net, sizeof(net));
+    s_status.state = VPN_STATE_PAUSED;
+    ESP_LOGI(TAG, "paused on %s (marked Pause VPN): the tunnel stays down "
+             "until the station leaves it", net);
+    vpn_events_state(false, true, net);
+}
+
 static void enter_connected(void)
 {
     const vpn_config_t *cfg = vpn_settings_config();
+    char net[33];
 
     s_status.state = VPN_STATE_CONNECTED;
     s_status.connects++;
@@ -153,11 +182,14 @@ static void enter_connected(void)
         }
     }
 
-    vpn_events_state(true);
+    sta_network(net, sizeof(net));
+    vpn_events_state(true, false, net);
     ESP_LOGI(TAG, "connected (%s)", vpn_settings_endpoint());
 }
 
-static void teardown(bool was_connected)
+/* @p paused: the teardown is a pause (the station joined a marked
+ * network), told to the event's readers in the same publish */
+static void teardown(bool was_connected, bool paused)
 {
     if (vpn_settings_config()->tailscale)
     {
@@ -173,7 +205,10 @@ static void teardown(bool was_connected)
 
     if (was_connected)
     {
-        vpn_events_state(false);
+        char net[33];
+
+        sta_network(net, sizeof(net));
+        vpn_events_state(false, paused, net);
     }
 }
 
@@ -204,12 +239,32 @@ static void state_task(void *arg)
         {
             if (s_status.state >= VPN_STATE_CONNECTING)
             {
-                teardown(s_status.state == VPN_STATE_CONNECTED);
+                teardown(s_status.state == VPN_STATE_CONNECTED, false);
             }
 
             s_status.state = VPN_STATE_DISABLED;
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
+        }
+
+        /* ---- PAUSED: the station is on a network marked "Pause VPN"
+         * (issue #976): park until it leaves; the backoff starts from
+         * its minimum when it does */
+        if (paused_here())
+        {
+            if (s_status.state != VPN_STATE_PAUSED)
+            {
+                enter_paused();
+            }
+
+            backoff_s = VPN_BACKOFF_MIN_S;
+            vTaskDelay(pdMS_TO_TICKS(VPN_POLL_MS));
+            continue;
+        }
+
+        if (s_status.state == VPN_STATE_PAUSED)
+        {
+            ESP_LOGI(TAG, "left the paused network: resuming");
         }
 
         /* ---- WAITING: uplink + a sane clock (WG handshake needs it) */
@@ -242,7 +297,7 @@ static void state_task(void *arg)
         if (tunnel_up() != ESP_OK)
         {
             s_status.failures++;
-            teardown(false);
+            teardown(false, false);
             vTaskDelay(pdMS_TO_TICKS(backoff_s * 1000));
             backoff_s = (backoff_s * 2 > VPN_BACKOFF_MAX_S)
                             ? VPN_BACKOFF_MAX_S : backoff_s * 2;
@@ -250,6 +305,7 @@ static void state_task(void *arg)
         }
 
         bool up = false;
+        bool paused_meanwhile = false;
         /* tailscale needs the full control-plane dance (register +
          * map + DERP/DISCO): give it a longer budget than a plain
          * WG handshake */
@@ -259,6 +315,14 @@ static void state_task(void *arg)
         {
             if (!network_up())
             {
+                break;
+            }
+
+            if (paused_here())
+            {
+                /* the station landed on a marked network mid-attempt:
+                 * not a failure, the top of the loop parks */
+                paused_meanwhile = true;
                 break;
             }
 
@@ -276,11 +340,17 @@ static void state_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
+        if (paused_meanwhile)
+        {
+            teardown(false, true);
+            continue;
+        }
+
         if (!up)
         {
             ESP_LOGW(TAG, "no handshake within %d s", budget_s);
             s_status.failures++;
-            teardown(false);
+            teardown(false, false);
             vTaskDelay(pdMS_TO_TICKS(backoff_s * 1000));
             backoff_s = (backoff_s * 2 > VPN_BACKOFF_MAX_S)
                             ? VPN_BACKOFF_MAX_S : backoff_s * 2;
@@ -293,7 +363,7 @@ static void state_task(void *arg)
 
         uint32_t silent_s = 0;
 
-        while (s_run && network_up())
+        while (s_run && network_up() && !paused_here())
         {
             vTaskDelay(pdMS_TO_TICKS(VPN_POLL_MS));
 
@@ -311,9 +381,26 @@ static void state_task(void *arg)
             }
         }
 
-        teardown(true);
-        ESP_LOGI(TAG, "left connected state (network %s)",
-                 network_up() ? "up" : "down");
+        bool pause_now = paused_here();
+
+        teardown(true, pause_now);
+
+        if (pause_now)
+        {
+            /* the station joined a marked network: one publish (the
+             * teardown's) and one line, then the top of the loop parks */
+            char net[33];
+
+            sta_network(net, sizeof(net));
+            s_status.state = VPN_STATE_PAUSED;
+            ESP_LOGI(TAG, "paused on %s (marked Pause VPN): tunnel down "
+                     "until the station leaves it", net);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "left connected state (network %s)",
+                     network_up() ? "up" : "down");
+        }
     }
 }
 
@@ -387,6 +474,8 @@ esp_err_t vpn_manager_status(vpn_manager_status_t *out)
     strlcpy(out->endpoint, vpn_settings_endpoint(),
             sizeof(out->endpoint));
     out->tailscale = cfg->tailscale;
+    out->paused = (s_status.state == VPN_STATE_PAUSED);
+    sta_network(out->network, sizeof(out->network));
     out->uptime_s = (s_status.state == VPN_STATE_CONNECTED)
         ? (esp_log_timestamp() - s_up_since_ms) / 1000 : 0;
 

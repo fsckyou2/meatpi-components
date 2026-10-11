@@ -559,6 +559,32 @@ Preview: `mock_api.js` serves the real `/api/autopid/dtc` shape (presets
 `window.__mockPreset.dtc = "obd" | "wwh"`) and an ISO 27145 van for the
 detection (`detect: "wwh"`). Probe: `probe_wwh.mjs` (38 checks).
 
+### Pause VPN per network (2026-10-11, issue #976)
+
+The flags live with the networks under Settings > WiFi > Station: the schema-driven
+station form renders `sta_vpn_pause` as a switch labelled `Pause VPN` right under the
+password (`LABELS` / `HELP`, the advanced rows sort below the essentials), and
+`fallbackNetworks()` draws a `pause VPN` tick beside `trusted` on every backup block
+(deleting a block resets the flag). The VPN page sets nothing: `status()` paints the
+badge `Paused on <network>` as an info chip while `/api/vpn` says `paused`, the debug
+block carries a `Network` row, and one note at the end of VPN Settings
+(`data-key="vpn_pause_note"`) names the marked networks (read from
+`/api/settings/wifi_manager`) with a link to the WiFi tab; it hides while the VPN is
+disabled. The Status page's VPN row goes through `vpnWord()` (Connected / Paused on X /
+Waiting for network / Connecting / Disabled). Probe: `probe_vpn_pause.mjs` (mock presets
+`vpn` and `wifi`). Mockup Ali decided on: the artifact linked from
+`internal/TASK_vpn_pause.md`.
+
+### Routes through the tunnel (2026-10-11, issue #975)
+
+The VPN Settings card shows `routes` as one field, "Routes through the
+tunnel", right under the tunnel address (not advanced; `LABELS` / `HELP` /
+`PLACEHOLDER`): a comma list of CIDRs, the tunnel's own network included.
+`importWgConf()` maps EVERY IPv4 AllowedIPs entry of a wg-quick file into it
+and turns `0.0.0.0/0` into Route all traffic (it used to keep the first entry
+as allowed_ip + mask). The debug block carries a `Routes` row from
+`/api/vpn`. Probe: `probe_vpn_routes.mjs`.
+
 ## On-demand page chunks (2026-09-07)
 
 The main page must not grow (meatpi: "we cannot increase the size of the

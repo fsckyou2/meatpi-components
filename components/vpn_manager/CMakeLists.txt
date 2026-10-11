@@ -14,8 +14,10 @@ idf_component_register(
     # (vendored esp_wireguard API) or Tailscale (vendored microlink).
     # Both share ONE WireGuard core (wireguard_lwip). /api/vpn and the
     # `vpn` command are optional (main wires them).
+    # wifi_manager: the per-network "Pause VPN" flag (issue #976), asked on
+    # the state task's lap; feature -> service, no cycle.
     PRIV_REQUIRES esp_wireguard wireguard_lwip microlink esp_netif lwip mbedtls esp_hw_support
-                  dev_status_manager rtc_manager event_manager
+                  dev_status_manager rtc_manager event_manager wifi_manager ip4_routes
                   http_server_manager settings_manager log_manager
                   cmdline_manager
 )

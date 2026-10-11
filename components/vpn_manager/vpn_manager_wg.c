@@ -29,21 +29,24 @@
  *
  *        esp_wireguard's allowed_ip/allowed_ip_mask configure the lwIP
  *        netif, NOT a WireGuard AllowedIPs route: allowed_ip becomes
- *        the netif's LOCAL address (netif_add uses it directly) and
- *        the mask is what steers tunnel-subnet destinations into the
- *        netif (dest & mask == addr & mask). So the netif IP is ALWAYS
- *        Interface.Address; the user's AllowedIPs contributes only the
- *        netmask, and 0.0.0.0 (the route-everything idiom) falls back
- *        to /32: the default_route flag handles it. Passing the
- *        AllowedIPs NETWORK address through instead brought the netif
- *        up as e.g. 10.8.0.0 and silently killed the whole data plane
- *        (BUG_WG_NETIF_ADDR.md).
+ *        the netif's LOCAL address (netif_add uses it directly). The
+ *        netif IP is ALWAYS Interface.Address with a /32 netmask;
+ *        passing the AllowedIPs NETWORK address through instead
+ *        brought the netif up as e.g. 10.8.0.0 and silently killed the
+ *        whole data plane (BUG_WG_NETIF_ADDR.md). Which destinations
+ *        enter the tunnel is the `routes` list (issue #975,
+ *        2026-10-11): every CIDR goes into ip4_routes' table for this
+ *        netif once the tunnel is up (lwIP's route lookup consults it
+ *        before its netif walk; the tunnel's own network is one of the
+ *        routes) and leaves it before the netif is removed;
+ *        `default_route` still makes the netif the default one.
  */
 #include <string.h>
 
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wireguard.h"
+#include "ip4_routes.h"
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
 
@@ -59,7 +62,6 @@ static char s_endpoint[64];
 static char s_priv[64];
 static char s_pub[64];
 static char s_psk[64];
-static char s_mask[32];
 
 static bool resolve_ipv4(const char *host, char *out, size_t len)
 {
@@ -128,21 +130,10 @@ esp_err_t vpn_wg_up(const vpn_config_t *cfg)
     }
 
     s_cfg.allowed_ip = s_addr;
+    s_cfg.allowed_ip_mask = "255.255.255.255"; /* the routes list steers */
 
-    if (cfg->allowed_ip[0] != '\0' &&
-        strcmp(cfg->allowed_ip, "0.0.0.0") != 0 &&
-        cfg->allowed_ip_mask[0] != '\0')
-    {
-        strlcpy(s_mask, cfg->allowed_ip_mask, sizeof(s_mask));
-        s_cfg.allowed_ip_mask = s_mask;
-    }
-    else
-    {
-        s_cfg.allowed_ip_mask = "255.255.255.255";
-    }
-
-    ESP_LOGI(TAG, "WG netif %s mask %s (AllowedIPs %s)", s_addr,
-             s_cfg.allowed_ip_mask, cfg->allowed_ip);
+    ESP_LOGI(TAG, "WG netif %s/32, routes: %s", s_addr,
+             cfg->routes[0] ? cfg->routes : "(none beyond default_route)");
 
     if (!resolve_ipv4(cfg->endpoint, s_endpoint, sizeof(s_endpoint)))
     {
@@ -175,6 +166,18 @@ esp_err_t vpn_wg_up(const vpn_config_t *cfg)
         return err;
     }
 
+    /* the split tunnel (issue #975): every listed network routes into
+       this netif; the list was validated at the settings PUT */
+    ip4_routes_entry_t routes[VPN_MAX_ROUTES];
+    int n = ip4_routes_parse_list(cfg->routes, routes, VPN_MAX_ROUTES,
+                                  NULL, 0);
+
+    if (n > 0 && s_ctx.netif != NULL &&
+        ip4_routes_set(s_ctx.netif, routes, (size_t)n) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "routes not installed: the route table is full");
+    }
+
     ESP_LOGI(TAG, "tunnel up to %s:%d (handshake pending)", s_endpoint,
              cfg->port);
     return ESP_OK;
@@ -189,6 +192,8 @@ void vpn_wg_down(void)
 
     if (s_ctx.netif != NULL)
     {
+        ip4_routes_clear(s_ctx.netif); /* before the netif goes */
+
         esp_err_t err = esp_wireguard_disconnect(&s_ctx);
 
         if (err != ESP_OK)
