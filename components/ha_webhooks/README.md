@@ -16,8 +16,9 @@ Feature component. Consumes `http_server_manager` (the route),
 `http_client_manager` (outbound POST + TLS), `cert_manager` (private-CA
 sets), `autopid` (`autopid_snapshot` + `autopid_config_json_dup`),
 `dev_status_manager` (the status section + `device_id`),
-`battery_monitor` (`batt_voltage`), `vpn_manager` (`vpn_status`/`vpn_ip`)
-and `mdns_manager` (the `mdns` configuration URL). Config lives in
+`battery_monitor` (`batt_voltage`), `wifi_manager` (`sta_ip`),
+`vpn_manager` (`vpn_status`/`vpn_ip`) and `mdns_manager` (the `mdns`
+configuration URL). Config lives in
 `settings_manager` (`"ha_webhooks"`); the URL push is a documented live
 exception to reboot-to-apply.
 
@@ -38,11 +39,19 @@ identical on every product built from the V6 core.
   `status.device_id/fw_version/hw_version` GUARANTEED every push (diff
   mode overlays them back after the diff: HA's identity check + update
   entity read them). `status` also carries `device_type`, `mdns`,
-  `wifi_mode`, `ble_status`, `batt_voltage` and (while the tunnel is
-  up) `vpn_status`/`vpn_ip` (HA's away-from-home backup endpoint).
+  `wifi_mode`, `ble_status`, `batt_voltage`, (while the station holds an
+  address) **`sta_ip`** (2026-10-11, issue #977: the integration's station
+  IP diagnostic sensor and the device card's `configuration_url` read it;
+  the legacy `/check_status` had it for the polling integration, no
+  webhook push ever did) and (while the tunnel is up)
+  `vpn_status`/`vpn_ip` (HA's away-from-home backup endpoint).
   Sections are diffed in `changed` mode and omitted when empty; a fresh
   registration forces a full **resync** so a new HA sees the complete
-  state. **`gps`** (2026-09-09): the contract §5.4 block
+  state (since 2026-10-11 that full push also primes the diff caches,
+  so the next push is a real diff; it used to go out whole once more,
+  the sta_ip bench caught it). The builders live in
+  `ha_webhooks_payload.c` (`hw_payload_build()`), the poster task,
+  gzip and the failover in `ha_webhooks_post.c`. **`gps`** (2026-09-09): the contract §5.4 block
   `{latitude, longitude, accuracy, altitude, speed, heading, satellites}`
   from `usb_acm_cli_gps_get()` while a live fix exists: what HA's
   Location device_tracker reads (it never updated for WiCAN Pro before);
@@ -96,6 +105,14 @@ identical on every product built from the V6 core.
   (`status.device_id` present, no `autopid_data`) and `status:"ok"`
   stats; restores autopid and clears the webhook. Receiver on any
   host both sides reach (`--serve` on the PC, or `--pi rpi001`).
+- `tools/testbench/ha/ha_webhook_sta_ip_bench.py` (`HA WEBHOOK STA IP
+  PASS`, issue #977): the station address in the push. Registers a
+  receiver; the first push (the resync) must carry `status.sta_ip` equal
+  to the address of `/api/wifi/status`, a later push in `changed` mode
+  must not repeat it unchanged (in `full` mode it is there every time),
+  no ha_webhooks E line in the log ring; puts the registration it found
+  back (or DELETEs when there was none) and the interval through
+  settings. Same receiver options as the gate bench.
 - `tools/testbench/ha/ha_lte_push_bench.py` (`HA LTE PUSH PASS`, runs ON
   rpi001): the car-on-the-road leg - the DUT roams to the paired
   ESPNetLink AP (LTE + GPS), `--capture` asserts the `gps` block + the

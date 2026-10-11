@@ -68,8 +68,8 @@ then carries `status` (+ `config`) only - a status-only push is valid
   "status": { "device_id": "…", "fw_version": "6.0.0", "hw_version": "WiCAN-PRO",
               "device_type": "wican_pro", "mdns": "http://wican_<id>.local",
               "bits": {…}, "uptime": "…", "version": "…", "temp_c": 33.1,
-              "wifi_mode": "Station", "ble_status": "disable",
-              "batt_voltage": 12.53,
+              "wifi_mode": "Station", "sta_ip": "192.168.1.23",
+              "ble_status": "disable", "batt_voltage": 12.53,
               "vpn_status": "connected", "vpn_ip": "10.6.0.2" },
   "autopid_data": { "RPM": 820, "Speed": 0,
                     "gps_latitude": -37.90535, "gps_longitude": 145.145047,
@@ -88,6 +88,17 @@ then carries `status` (+ `config`) only - a status-only push is valid
 - **`vpn_ip` / `vpn_status`**: present while the WireGuard/Tailscale
   tunnel is CONNECTED; HA records the address as the away-from-home
   backup endpoint for registration + control commands.
+- **`sta_ip`** (issue #977, added 2026-10-11): the station's IPv4 while
+  it holds one (`wifi_manager_get_sta_ip()`): the key the integration's
+  station IP diagnostic sensor and the device card's `configuration_url`
+  read. The legacy `/check_status` carried it for the polling
+  integration; no webhook push ever did, so on a push-based install the
+  sensor stayed empty. Omitted without a station address: in `changed`
+  mode HA keeps the last one until the station joins again, and a new
+  address (a roam, a new lease) is a change that goes out at once. On
+  the road the station sits on the ESPNetLink dongle's network
+  (192.168.80.x) and that address is reported as it is: `vpn_ip` stays
+  the road-side endpoint.
 - **`gps`** (contract §5.4, added 2026-09-09): present while there is a
   LIVE fix, `{latitude, longitude, accuracy (m), altitude (m), speed
   (m/s), heading (°), satellites}`, the same shape as `GET /api/gps`
@@ -104,7 +115,9 @@ then carries `status` (+ `config`) only - a status-only push is valid
 - **`data_mode`** (settings): `full` = every section each cycle;
   `changed` (default) = only keys that changed vs the previous post, empty
   sections omitted (except the identity overlay above). A fresh
-  registration always sends a full **resync**.
+  registration always sends a full **resync**, and the push after it is
+  a diff (since 2026-10-11; until then the resync never primed the diff
+  caches and the next push went out whole once more).
 - **`gzip`** (settings, default off, works in EITHER data mode): the
   body is compressed (`Content-Encoding: gzip`) via the ROM miniz
   deflate, contract-v2 ask #9 item 4, the LTE data saver (JSON

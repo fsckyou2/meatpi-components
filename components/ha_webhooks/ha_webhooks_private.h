@@ -94,14 +94,27 @@ esp_err_t hw_config_apply_live(const hw_config_t *cfg);
 void hw_stats_get(hw_stats_t *out);
 void hw_stats_set(const hw_stats_t *in);
 
+/* ---- payload (ha_webhooks_payload.c) -------------------------------------- */
+
+/** The push body {schema, status, autopid_data, config, gps} as a heap
+ *  string (caller frees); @p full_mode = every section whole each time
+ *  (the configured `full` mode), else the keys that changed since the
+ *  previous build, the first build after a registration whole. NULL on
+ *  allocation failure. Built from RAM sources only: safe from the
+ *  poster's PSRAM stack. */
+char *hw_payload_build(bool full_mode);
+
+/** Make the NEXT build a full snapshot (drop the diff caches). */
+void  hw_payload_resync(void);
+
 /* ---- poster (ha_webhooks_post.c) ------------------------------------------ */
 
 esp_err_t hw_poster_start(void);
 void      hw_poster_stop(void);
 
-/** Force the NEXT post to be a full snapshot (drop the diff caches): a
- *  newly-registered HA needs the whole picture, not a diff against stale
- *  state. Called on a URL push. */
+/** Force the NEXT post to be a full snapshot (drop the diff caches) and
+ *  end a rejected pause: a newly-registered HA needs the whole picture,
+ *  not a diff against stale state. Called on a URL push. */
 void      hw_poster_resync(void);
 
 /** UTC ISO8601 into a HW_TS_LEN buffer. */

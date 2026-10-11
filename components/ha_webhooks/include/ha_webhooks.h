@@ -28,9 +28,12 @@
  *   - inbound  `/api/webhook` GET/POST/DELETE: the HA HACS integration
  *              auto-registers its webhook URL here (discovery push);
  *   - outbound a PSRAM-stack poster task that, every `interval_s`, builds
- *              `{status, autopid_data, config}` and POSTs it to the
- *              webhook URL(s) with failover, while autopid is enabled and
- *              the network is up.
+ *              `{status, autopid_data, config, gps}` (ha_webhooks_payload.c;
+ *              `status` carries the identity keys, the station address
+ *              `sta_ip` since 2026-10-11 for issue #977, battery, VPN) and
+ *              POSTs it to the webhook URL(s) with failover, while enabled
+ *              and the network is up (autopid may be off: a status-only
+ *              push is valid).
  *
  * Feature component: consumes http_server_manager, http_client_manager,
  * cert_manager, autopid (snapshot + cached config), dev_status_manager.
