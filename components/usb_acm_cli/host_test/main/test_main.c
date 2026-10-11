@@ -8,8 +8,10 @@
 #include <math.h>
 #include <string.h>
 
+#include "cJSON.h"
 #include "unity.h"
 
+#include "usb_acm_cli_migrate.h"
 #include "usb_acm_gps.h"
 #include "usb_acm_nmea.h"
 
@@ -17,12 +19,12 @@
  * valid fix with realistic magnitudes), wrapped in the console echo +
  * esp> prompt exactly as /api/usb/acm/cmd returns it */
 static const char *FIX_WRAPPED =
-    "gps -p -j\r\n\r\r\n{\"valid\":true,\"lat\":-37.9053500,"
-    "\"lon\":145.1450470,\"satellites\":7,\"sats_in_view\":11,"
+    "gps -p -j\r\n\r\r\n{\"valid\":true,\"lat\":-25.3444000,"
+    "\"lon\":131.0369000,\"satellites\":7,\"sats_in_view\":11,"
     "\"fix_quality\":1,\"fix_type\":3,\"altitude_m\":88.8,\"hdop\":1.2,"
     "\"pdop\":1.9,\"vdop\":1.4,\"speed_knots\":0.02,\"speed_kmph\":3.6,"
     "\"course_deg\":270.5,\"age_ms\":480,\"agnss_enabled\":true,"
-    "\"cached_lat\":-37.905350,\"cached_lon\":145.145047,"
+    "\"cached_lat\":-25.344400,\"cached_lon\":131.036900,"
     "\"cached_alt\":88.8}\r\r\nOK\r\r\nesp> \r\nOK\r\nwican> ";
 
 /* no live fix: the indoor default: valid:false but a cached position
@@ -31,7 +33,7 @@ static const char *NO_FIX =
     "{\"valid\":false,\"lat\":0.0000000,\"lon\":0.0000000,"
     "\"satellites\":0,\"sats_in_view\":0,\"hdop\":100.0,"
     "\"altitude_m\":0.0,\"speed_kmph\":0.0,\"course_deg\":0.0,"
-    "\"cached_lat\":-37.905350,\"cached_lon\":145.145047}";
+    "\"cached_lat\":-25.344400,\"cached_lon\":131.036900}";
 
 void test_valid_fix(void)
 {
@@ -39,8 +41,8 @@ void test_valid_fix(void)
 
     TEST_ASSERT_TRUE(usb_acm_gps_parse(FIX_WRAPPED, &g));
     TEST_ASSERT_TRUE(g.valid);
-    TEST_ASSERT_DOUBLE_WITHIN(1e-6, -37.90535, g.latitude);
-    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 145.145047, g.longitude);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, -25.3444, g.latitude);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 131.0369, g.longitude);
     TEST_ASSERT_DOUBLE_WITHIN(1e-3, 88.8, g.altitude_m);
     TEST_ASSERT_DOUBLE_WITHIN(1e-3, 3.6, g.speed_kmph);
     TEST_ASSERT_DOUBLE_WITHIN(1e-3, 270.5, g.heading_deg);
@@ -115,9 +117,9 @@ void test_negative_and_zero_heading(void)
 
 /* a u-blox 7 on the bench, 1 Hz: the GGA then the RMC of one second */
 static const char *NMEA_GGA =
-    "$GPGGA,081836.00,3754.3210,S,14508.7028,E,1,09,1.20,88.8,M,-3.2,M,,*6B";
+    "$GPGGA,081836.00,2520.6640,S,13102.2140,E,1,09,1.20,88.8,M,-3.2,M,,*6C";
 static const char *NMEA_RMC =
-    "$GPRMC,081836.00,A,3754.3210,S,14508.7028,E,0.65,270.50,071026,,,A*46";
+    "$GPRMC,081836.00,A,2520.6640,S,13102.2140,E,0.65,270.50,071026,,,A*41";
 static const char *NMEA_RMC_V =
     "$GPRMC,081837.00,V,,,,,,,071026,,,N*7A";
 static const char *NMEA_RMC_GN =
@@ -126,7 +128,7 @@ static const char *NMEA_GSV =
     "$GPGSV,3,1,11,01,45,120,40,02,30,210,35,03,60,045,42,04,15,300,28*73";
 static const char *NMEA_VTG = "$GPVTG,270.50,T,,M,0.65,N,1.20,K,A*3D";
 static const char *NMEA_GGA_NOFIX =
-    "$GPGGA,081900.00,3754.3210,S,14508.7028,E,0,00,99.99,,M,,M,,*40";
+    "$GPGGA,081900.00,2520.6640,S,13102.2140,E,0,00,99.99,,M,,M,,*47";
 
 void test_nmea_gga_then_rmc_is_a_fix(void)
 {
@@ -138,8 +140,8 @@ void test_nmea_gga_then_rmc_is_a_fix(void)
     TEST_ASSERT_TRUE(st.have_gga);
     TEST_ASSERT_EQUAL_INT(1, usb_acm_nmea_feed_line(&st, NMEA_RMC, &g));
     TEST_ASSERT_TRUE(g.valid);
-    TEST_ASSERT_DOUBLE_WITHIN(1e-6, -37.905350, g.latitude);
-    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 145.145047, g.longitude);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, -25.344400, g.latitude);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 131.0369, g.longitude);
     TEST_ASSERT_DOUBLE_WITHIN(1e-3, 1.2038, g.speed_kmph);   /* 0.65 kn */
     TEST_ASSERT_DOUBLE_WITHIN(1e-3, 270.5, g.heading_deg);
     TEST_ASSERT_EQUAL_INT(9, g.satellites);
@@ -195,7 +197,7 @@ void test_nmea_bad_checksum_is_dropped(void)
     usb_acm_nmea_init(&st);
     /* one byte of the body flipped: the checksum no longer matches */
     TEST_ASSERT_EQUAL_INT(0, usb_acm_nmea_feed_line(&st,
-        "$GPRMC,081836.00,A,3754.3211,S,14508.7028,E,0.65,270.50,071026,,,A*46", &g));
+        "$GPRMC,081836.00,A,2520.6641,S,13102.2140,E,0.65,270.50,071026,,,A*41", &g));
     TEST_ASSERT_EQUAL_UINT32(1, st.bad_checksum);
     TEST_ASSERT_EQUAL_UINT32(0, st.sentences);
     TEST_ASSERT_FALSE(usb_acm_nmea_is_sentence("$GPRMC,1,A*ZZ"));
@@ -247,10 +249,62 @@ void test_nmea_bytes_any_chunking(void)
     TEST_ASSERT_EQUAL_UINT32(5, st.sentences);
 }
 
+/* ---- the settings migration (v1 `enabled` -> v2 `console`, 2026-10-11) ---- */
+
+static void test_migrate_v1_console_on_carried_over(void)
+{
+    cJSON *doc = cJSON_Parse("{\"enabled\":true,\"cli\":true}");
+
+    TEST_ASSERT_NOT_NULL(doc);
+    TEST_ASSERT_EQUAL(ESP_OK, usb_acm_cli_settings_migrate(1, doc));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(doc, "console")));
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(doc, "enabled"));
+    /* gps is left to the schema's default (on), never written here */
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(doc, "gps"));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(doc, "cli")));
+    cJSON_Delete(doc);
+}
+
+static void test_migrate_v1_console_off_and_missing(void)
+{
+    cJSON *doc = cJSON_Parse("{\"enabled\":false,\"cli\":false}");
+
+    TEST_ASSERT_EQUAL(ESP_OK, usb_acm_cli_settings_migrate(1, doc));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(doc, "console")));
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(doc, "enabled"));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(doc, "cli")));
+    cJSON_Delete(doc);
+
+    /* a v1 document without the key (never written, but a fill-in reads false) */
+    doc = cJSON_Parse("{\"cli\":true}");
+    TEST_ASSERT_EQUAL(ESP_OK, usb_acm_cli_settings_migrate(1, doc));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(doc, "console")));
+    cJSON_Delete(doc);
+}
+
+static void test_migrate_current_and_bad_input(void)
+{
+    /* a v2 document is left alone */
+    cJSON *doc = cJSON_Parse("{\"gps\":false,\"console\":true,\"cli\":true}");
+
+    TEST_ASSERT_EQUAL(ESP_OK, usb_acm_cli_settings_migrate(2, doc));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(doc, "gps")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(doc, "console")));
+    cJSON_Delete(doc);
+
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, usb_acm_cli_settings_migrate(1, NULL));
+    doc = cJSON_Parse("[1,2]");
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, usb_acm_cli_settings_migrate(1, doc));
+    cJSON_Delete(doc);
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
 
+    RUN_TEST(test_migrate_v1_console_on_carried_over);
+    RUN_TEST(test_migrate_v1_console_off_and_missing);
+    RUN_TEST(test_migrate_current_and_bad_input);
     RUN_TEST(test_valid_fix);
     RUN_TEST(test_no_fix_is_rejected);
     RUN_TEST(test_lat_not_confused_with_cached_lat);

@@ -27,6 +27,8 @@
 
 #include "esp_err.h"
 
+#include "usb_acm_gps.h"
+
 esp_err_t usb_acm_cli_register_cli(void);
 
 /* ---- settings (usb_acm_cli_settings.c) --------------------------------------- */
@@ -34,5 +36,23 @@ esp_err_t usb_acm_cli_register_cli(void);
 /** Register the "usb_acm_cli" descriptor with settings_manager. */
 esp_err_t usb_acm_cli_settings_register(void);
 
-bool usb_acm_cli_settings_enabled(void);       /* console feature on          */
-bool usb_acm_cli_settings_is_configured(void); /* boot apply ran (std §4.3)   */
+bool usb_acm_cli_settings_gps(void);           /* read a USB GPS receiver (default on)  */
+bool usb_acm_cli_settings_console(void);       /* talk to the ESPNetLink's console       */
+bool usb_acm_cli_settings_is_configured(void); /* boot apply ran (std section 4.3)       */
+
+/* ---- the fix cache and the dongle's poll task (usb_acm_cli_poll.c) ------------ */
+
+/** Create the cache lock (init-time, before any task runs). */
+esp_err_t usb_acm_cli_poll_init(void);
+
+/** Start the ESPNetLink console poll task (`gps -p -j` every 5 s). Idempotent. */
+esp_err_t usb_acm_cli_poll_start(void);
+
+/** Idle the poll task (it never exits: a stop/start cycle cannot race it). */
+void usb_acm_cli_poll_stop(void);
+
+/** The one writer of the fix cache: NULL = no live fix. Any task context. */
+void usb_acm_cli_gps_cache_set(const usb_acm_gps_t *fix);
+
+/** Hand a fresh fix to the sink main wired (the autopid publisher), if any. */
+void usb_acm_cli_gps_publish(const usb_acm_gps_t *fix);

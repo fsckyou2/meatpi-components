@@ -23,27 +23,41 @@
 /**
  * @file usb_acm_cli_settings.c
  * @brief settings_manager descriptor for usb_acm_cli: field-table schema
- *        (source of truth for shape/defaults) and on_apply (stores the
- *        boot-applied enabled flag; registers the CLI, settings-gated per
- *        standard §6b).
+ *        (source of truth for shape/defaults), the v1 -> v2 migration
+ *        (usb_acm_cli_migrate.c, pure) and on_apply (stores the two
+ *        boot-applied switches; registers the CLI, settings-gated per
+ *        standard section 6b).
+ *
+ * Version 2 (2026-10-11, issue #978): `gps` (read a USB GPS receiver on the
+ * connector, default on) and `console` (talk to the ESPNetLink's console
+ * over USB, default off; v1's `enabled`). A receiver is read whether the
+ * console is on or off.
  */
 #include "settings_manager.h"
 
+#include "usb_acm_cli_migrate.h"
 #include "usb_acm_cli_private.h"
 
 static const settings_field_t FIELDS[] =
 {
-    SETTINGS_BOOL("enabled", false),
+    SETTINGS_BOOL("gps", true),      /* read a USB GPS receiver (NMEA)         */
+    SETTINGS_BOOL("console", false), /* the ESPNetLink's console over the cable */
     SETTINGS_BOOL("cli", true),
 };
 
 /* boot-applied settings */
 static bool s_configured;
-static bool s_enabled;
+static bool s_gps;
+static bool s_console;
 
-bool usb_acm_cli_settings_enabled(void)
+bool usb_acm_cli_settings_gps(void)
 {
-    return s_enabled;
+    return s_gps;
+}
+
+bool usb_acm_cli_settings_console(void)
+{
+    return s_console;
 }
 
 bool usb_acm_cli_settings_is_configured(void)
@@ -53,8 +67,13 @@ bool usb_acm_cli_settings_is_configured(void)
 
 static esp_err_t on_apply(const cJSON *settings)
 {
-    s_enabled = cJSON_IsTrue(
-        cJSON_GetObjectItemCaseSensitive(settings, "enabled"));
+    const cJSON *gps = cJSON_GetObjectItemCaseSensitive(settings, "gps");
+
+    /* the schema fills a missing key with its default; a document without
+     * it (never, after validation) still reads as the default: on */
+    s_gps = (gps == NULL) ? true : cJSON_IsTrue(gps);
+    s_console = cJSON_IsTrue(
+        cJSON_GetObjectItemCaseSensitive(settings, "console"));
 
     if (!cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(settings, "cli")))
     {
@@ -75,10 +94,11 @@ esp_err_t usb_acm_cli_settings_register(void)
     static const settings_descriptor_t DESC =
     {
         .name        = "usb_acm_cli",
-        .version     = 1,
+        .version     = USB_ACM_CLI_SETTINGS_VERSION,
         .fields      = FIELDS,
         .field_count = sizeof(FIELDS) / sizeof(FIELDS[0]),
         .on_apply    = on_apply,
+        .on_migrate  = usb_acm_cli_settings_migrate,
     };
 
     return settings_manager_register(&DESC);

@@ -44,6 +44,13 @@ static int cmd_acm(int argc, char **argv)
         return 0;
     }
 
+    if (!usb_acm_cli_console_enabled())
+    {
+        cmdline_printf("the ESPNetLink console is off in settings "
+                       "(usb_acm_cli.console)\n");
+        return 1;
+    }
+
     if (!usb_acm_cli_connected())
     {
         cmdline_printf("no CDC-ACM device attached\n");

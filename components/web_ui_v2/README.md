@@ -287,6 +287,19 @@ green afterwards). What changed, and what to keep doing:
   lines by the IDF level letter; About/pill take the device id from
   `/api/info` (`/api/status` has none); USB page ordered status →
   settings → console.
+- **USB GPS receiver (issue #978, 2026-10-11).** A plain receiver on the
+  connector (u-blox `1546`, or anything that speaks NMEA) gets a "GPS
+  receiver" card on USB > Status (the device, the sentences read, the fix
+  rows, where the fix goes; the off state points at the switch), the
+  connector card's last row reads "USB serial" (receiver / dongle console /
+  not bound), and the LTE & GPS card is shown for the dongle only. The
+  component's two switches sit on two tabs from ONE shared values object
+  (`settingsForm(..., {values, schema})`): `gps` ("USB GPS receiver", on by
+  default) in its own card on the Settings tab, `console` ("ESPNetLink
+  console over USB") on the Dongle console tab. The Status page's System
+  card gets a GPS row while a fix exists or a receiver is being read
+  (`gpsRow()`). Quick Setup's USB step reads the receiver live and stages
+  nothing. Probe: `tools/webui_preview/probe_usb_gps.mjs`.
 - Logger page rework (2026-09-06): the status reads the real card
   state (`/api/status` `sdcard_mounted` + `/api/fs/info`): one chip per
   state (Off / Recording / Paused / Waiting for storage / No SD card)

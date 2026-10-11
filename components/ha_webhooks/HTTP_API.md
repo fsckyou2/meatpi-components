@@ -72,11 +72,11 @@ then carries `status` (+ `config`) only - a status-only push is valid
               "ble_status": "disable", "batt_voltage": 12.53,
               "vpn_status": "connected", "vpn_ip": "10.6.0.2" },
   "autopid_data": { "RPM": 820, "Speed": 0,
-                    "gps_latitude": -37.90535, "gps_longitude": 145.145047,
+                    "gps_latitude": -25.3444, "gps_longitude": 131.0369,
                     "gps_altitude": 88.8, "gps_speed": 61.6,
                     "gps_heading": 270.5, "gps_satellites": 7 },
   "config": { … the /data/autopid/config.json tables … },
-  "gps": { "latitude": -37.90535, "longitude": 145.145047, "accuracy": 3,
+  "gps": { "latitude": -25.3444, "longitude": 131.0369, "accuracy": 3,
            "altitude": 88.8, "speed": 17.1, "heading": 270.5, "satellites": 7 } }
 ```
 - **`schema`**: payload shape version (contract-v2 ask #3); currently

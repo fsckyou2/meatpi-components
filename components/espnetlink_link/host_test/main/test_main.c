@@ -57,7 +57,7 @@ static const char *CREDS =
 static const char *GPS_HTTP_FIX =
     "{\"valid\":true,\"fix\":true,\"satellites\":9,\"sats_in_view\":14,"
     "\"fix_quality\":1,\"fix_type\":3,\"age_ms\":350,"
-    "\"latitude\":-37.9053500,\"longitude\":145.1450470,"
+    "\"latitude\":-25.3444000,\"longitude\":131.0369000,"
     "\"altitude_m\":88.8,\"hdop\":0.9,\"speed_kmph\":12.5,"
     "\"course_deg\":181.0}";
 
@@ -274,8 +274,8 @@ void test_gps_http_fix(void)
 
     TEST_ASSERT_TRUE(usb_acm_gps_parse(GPS_HTTP_FIX, &g));
     TEST_ASSERT_TRUE(g.valid);
-    TEST_ASSERT_DOUBLE_WITHIN(1e-6, -37.90535, g.latitude);
-    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 145.145047, g.longitude);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, -25.3444, g.latitude);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 131.0369, g.longitude);
     TEST_ASSERT_DOUBLE_WITHIN(1e-6, 88.8, g.altitude_m);
     TEST_ASSERT_DOUBLE_WITHIN(1e-6, 12.5, g.speed_kmph);
     TEST_ASSERT_DOUBLE_WITHIN(1e-6, 181.0, g.heading_deg);

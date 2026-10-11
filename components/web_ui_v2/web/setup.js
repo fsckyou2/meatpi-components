@@ -693,11 +693,10 @@ function usbSummary(L){
   if(kind==="gps"){
     const name=((u.device||{}).product)||"The receiver";
     if(g&&g.valid)return {state:"ok",icon:"navigation",title:"GPS fix",text:[name+": "+g.satellites+" satellites"+(g.accuracy?", about "+g.accuracy+" m":"")+". Position, speed, heading and altitude ride along with the vehicle data as ",h("code",{},"gps_latitude"),", ",h("code",{},"gps_longitude"),", ",h("code",{},"gps_speed")," and friends."],chip:["Fix","ok"]};
-    /* `reading` (2026-10-07): a bound receiver nobody reads (the console
-       off in settings) is read after the restart; older firmware has only
-       `connected` */
-    if(acm&&(acm.reading||(acm.reading===undefined&&acm.connected)))return {state:"run",icon:"navigation",title:"GPS receiver found, waiting for a fix",text:[name+" is being read"+(acm.nmea_sentences?" ("+acm.nmea_sentences+" sentences so far)":"")+". It needs a view of the sky; a cold start takes up to a minute."],chip:["No fix yet","warn"]};
-    return {state:"pend",icon:"navigation",title:"USB GPS receiver found",text:[name+" is on the connector. WiCAN reads it after the restart; position, speed, heading and altitude then ride along with the vehicle data."],chip:["Read after the restart",""]};
+    /* a receiver is read by default (issue #978, 2026-10-11); the one way it is not is
+       the USB GPS receiver switch under USB > Settings, which the wizard does not offer */
+    if(acm&&acm.gps===false)return {state:"warn",icon:"navigation",title:"USB GPS receiver found, switched off",text:[name+" is on the connector, but USB GPS receiver is off under USB > Settings, so WiCAN ignores it. Turn it on there after setup if you want its position."],chip:["Switched off","warn"]};
+    return {state:"run",icon:"navigation",title:"GPS receiver found, waiting for a fix",text:[name+" is being read"+(acm&&acm.nmea_sentences?" ("+acm.nmea_sentences+" sentences so far)":"")+". It needs a view of the sky; a cold start takes up to a minute."],chip:["No fix yet","warn"]};
   }
   if(kind==="unknown"){const dev=u.device||{};
     return {state:"warn",icon:"plug",title:"A USB device WiCAN does not support",text:["Something is on the connector"+(dev.product?": "+dev.product:dev.vid?" ("+dev.vid+":"+dev.pid+")":"")+". WiCAN works with the ESPNetLink, USB Ethernet adapters (ASIX, Realtek RTL8152, CDC) and NMEA GPS receivers."],chip:["Not supported","warn"]};}
@@ -724,14 +723,14 @@ function usbReview(item,line){
   if(k==="eth"){const u=L.u||{};
     return [item(u.eth_connected?"ok":"pend","USB connector","USB Ethernet adapter",line(USB_DRV[u.driver]||u.driver||"",W.usb.ethFirst?"cable first":"WiFi first"),u.ip?line("Address "+u.ip):line("No link yet","plug the network cable in"))];}
   if(k==="gps"){const g=L.g,dev=(L.u&&L.u.device)||{};
-    return [item(g&&g.valid?"ok":"pend","USB connector","USB GPS receiver",dev.product?line(dev.product):null,g&&g.valid?line(g.satellites+" satellites","published with the vehicle data"):line("Read after the restart","needs a view of the sky"))];}
+    const off=!!(L.acm&&L.acm.gps===false);
+    return [item(g&&g.valid?"ok":off?"warn":"pend","USB connector","USB GPS receiver",dev.product?line(dev.product):null,g&&g.valid?line(g.satellites+" satellites","published with the vehicle data"):off?line("Switched off","USB > Settings"):line("Waiting for a fix","needs a view of the sky"))];}
   return [];
 }
 
 SCREENS.usb=async()=>{
   if(D.usbhost===undefined){const s=await tryGet("/api/settings/usb_host_manager");D.usbhost=s?strip(s):null;}
   if(D.espnl===undefined){const s=await tryGet("/api/settings/espnetlink");D.espnl=s?strip(s):null;}   /* null: not in this build */
-  if(D.acm===undefined){const s=await tryGet("/api/settings/usb_acm_cli");D.acm=s?strip(s):null;}
   /* USB Ethernet is the recommendation (Ali, 2026-10-07); a dongle already
      paired keeps the mode it was paired with (the status says paired and the
      mode the device runs; seeded at the first reading, in refresh) */
@@ -868,7 +867,7 @@ async function applyAll(saveBtn,errEl){
         store.stage("espnetlink",nv);staged.push("espnetlink");D.espnl=nv;}}
     if(uk==="eth"&&D.usbhost&&!W.usb.hostFix){const uv=strip(D.usbhost);
       if(!!uv.prefer_usb_route!==!!W.usb.ethFirst){uv.prefer_usb_route=!!W.usb.ethFirst;store.stage("usb_host_manager",uv);staged.push("usb_host_manager");D.usbhost=uv;}}
-    if(uk==="gps"&&D.acm&&!D.acm.enabled){const av=strip(D.acm);av.enabled=true;store.stage("usb_acm_cli",av);staged.push("usb_acm_cli");D.acm=av;}
+    /* a GPS receiver needs nothing staged: it is read by default (issue #978) */
     W.applied=true;W.cur="reconnect";
     try{history.replaceState(null,"","#/setup/reconnect");}catch(_){}
     paint();

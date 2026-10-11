@@ -22,8 +22,9 @@
 
 /**
  * @file usb_acm_cli_http.c
- * @brief POST /api/usb/acm/cmd: send an AT/console line to the modem,
- *        return the response. GET /api/usb/acm: connection status.
+ * @brief POST /api/usb/acm/cmd: send a console line to the dongle, return
+ *        the response. GET /api/usb/acm: the bound device and the two
+ *        switches. GET /api/gps: the last fix.
  */
 #include <stdlib.h>
 #include <string.h>
@@ -62,17 +63,19 @@ static esp_err_t status_handler(httpd_req_t *req)
     cJSON *o = cJSON_CreateObject();
 
     cJSON_AddBoolToObject(o, "connected", usb_acm_cli_connected());
-    /* 2026-10-07: whether anyone reads the device (the console must be
-     * enabled), and what it turned out to be */
+    /* 2026-10-07: whether anyone reads the device, and what it turned out
+     * to be; 2026-10-11: the two switches as applied (issue #978) */
     cJSON_AddBoolToObject(o, "reading", usb_acm_cli_reading());
     cJSON_AddStringToObject(o, "mode", usb_acm_cli_mode());
     cJSON_AddNumberToObject(o, "nmea_sentences", usb_acm_cli_nmea_sentences());
+    cJSON_AddBoolToObject(o, "gps", usb_acm_cli_gps_enabled());
+    cJSON_AddBoolToObject(o, "console", usb_acm_cli_console_enabled());
     return send_json(req, o);
 }
 
-/* GET /api/gps: the dongle's last GPS fix (cache read). Device-contract
- * field names; `speed` in m/s per DEVICE_ENDPOINTS.md. Also flows to HA
- * as autopid `gps_*` parameters (main-wired). */
+/* GET /api/gps: the last GPS fix (cache read). Device-contract field names;
+ * `speed` in m/s per DEVICE_ENDPOINTS.md. Also flows to HA as autopid
+ * gps_* parameters (main-wired). */
 static esp_err_t gps_handler(httpd_req_t *req)
 {
     usb_acm_gps_t g;
@@ -172,11 +175,13 @@ static esp_err_t cmd_handler(httpd_req_t *req)
 
     cJSON *o = cJSON_CreateObject();
 
-    if (err == ESP_ERR_INVALID_STATE)
+    if (err == ESP_ERR_NOT_SUPPORTED || err == ESP_ERR_INVALID_STATE)
     {
         free(resp);
         cJSON_AddBoolToObject(o, "ok", false);
-        cJSON_AddStringToObject(o, "error", "no ACM device / busy");
+        cJSON_AddStringToObject(o, "error", (err == ESP_ERR_NOT_SUPPORTED)
+            ? "the ESPNetLink console is off (USB > Dongle console)"
+            : "no ACM device / busy");
         httpd_resp_set_status(req, "409 Conflict");
         return send_json(req, o);
     }

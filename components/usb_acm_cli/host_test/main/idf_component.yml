@@ -1,0 +1,5 @@
+## IDF v6 dropped the bundled `json` component; cJSON comes from the registry
+## (the bench Pi is offline from it: copy another suite's managed_components
+## and dependencies.lock next to this file's host_test/, e.g. config_backup's).
+dependencies:
+  espressif/cjson: "^1.7.18"
