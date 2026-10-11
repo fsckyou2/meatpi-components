@@ -104,6 +104,16 @@ bool wifi_manager_is_ap_started(void);
 /** Copy the current STA IPv4 address ("" when not connected). */
 esp_err_t wifi_manager_get_sta_ip(char *buf, size_t buf_len);
 
+/** Copy the name of the network the station is connected to ("" and
+ *  ESP_ERR_INVALID_STATE when it is not connected). */
+esp_err_t wifi_manager_get_sta_ssid(char *buf, size_t buf_len);
+
+/** "Pause VPN" (issue #976, 2026-10-11): true while the station is
+ *  connected to a network whose `sta_vpn_pause` / `fallbackN_vpn_pause`
+ *  flag is set. vpn_manager polls it on its one-second lap and keeps the
+ *  tunnel down meanwhile; false without a station session. */
+bool wifi_manager_sta_vpn_pause(void);
+
 /** Number of stations currently associated to our AP. */
 uint16_t wifi_manager_get_ap_station_count(void);
 

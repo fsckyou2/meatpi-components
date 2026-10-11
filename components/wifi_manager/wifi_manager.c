@@ -592,6 +592,39 @@ static volatile int s_connected_idx = -1; /* config index we're on      */
 static volatile bool s_sta_ever_connected;  /* an association this boot   */
 static uint32_t     s_last_roam_ms;
 
+/* ---- "Pause VPN" per network (issue #976, 2026-10-11) ---------------------
+ * vpn_manager asks on its one-second lap whether the station is on a
+ * network the user marked; the answer is the connected candidate's flag
+ * (the same index the trust gate uses), false without a station session. */
+bool wifi_manager_sta_vpn_pause(void)
+{
+    const wm_config_t *cfg = wm_settings_config();
+
+    return wm_vpn_pause_applies(cfg->vpn_pause, cfg->sta_count,
+                                s_connected_idx);
+}
+
+esp_err_t wifi_manager_get_sta_ssid(char *buf, size_t buf_len)
+{
+    int idx = s_connected_idx;
+    const wm_config_t *cfg = wm_settings_config();
+
+    if (buf == NULL || buf_len == 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    buf[0] = '\0';
+
+    if (idx < 0 || (size_t)idx >= cfg->sta_count)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    strlcpy(buf, cfg->sta[idx].ssid, buf_len);
+    return ESP_OK;
+}
+
 /* ---- network-trust admission gate (meatpi 2026-07-08) ---------------------
  * Untrusted (shared/office) networks must not expose configuration: when
  * the CURRENT STA network is marked untrusted, inbound admin requests

@@ -135,6 +135,13 @@ typedef struct
     bool         trusted[WM_MAX_CANDIDATES]; /* v3: untrusted nets
                                             refuse inbound admin
                                             arriving via STA        */
+    bool         vpn_pause[WM_MAX_CANDIDATES]; /* "Pause VPN" (issue #976,
+                                            2026-10-11): while the station
+                                            is on a marked network the VPN
+                                            stays down (vpn_manager asks
+                                            wifi_manager_sta_vpn_pause());
+                                            travels with its network through
+                                            the empty-slot collapse */
     uint32_t     sta_roam_interval_s;    /* while connected to a FALLBACK,
                                             re-check for a higher-priority
                                             network this often; 0 = never
@@ -165,6 +172,11 @@ bool wm_parse_ap_ipv4(const char *s, uint32_t *out);
 
 /** True when @p mask (host order) is a contiguous netmask (/1../31). */
 bool wm_netmask_valid(uint32_t mask);
+
+/** PURE (host-tested): does the "Pause VPN" flag of the connected candidate
+ *  apply? @p idx is the connected candidate index (-1 = no station session),
+ *  @p flags / @p count the config's per-candidate flags and list length. */
+bool wm_vpn_pause_applies(const bool *flags, size_t count, int idx);
 
 /** The DHCP/DNS host name to give the STA netif: @p configured (the
  *  `hostname` setting) when non-empty, else `wican_<device_id>` - the

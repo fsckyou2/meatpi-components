@@ -371,3 +371,18 @@ int wm_backoff_skip_loops(int32_t retry_count)
     return (skip > WM_BACKOFF_MAX_SKIP_LOOPS) ? WM_BACKOFF_MAX_SKIP_LOOPS
                                               : skip;
 }
+
+/* "Pause VPN" per network (issue #976, 2026-10-11): the flag of the
+ * connected candidate; nothing without a station session or for an index
+ * outside the configured list. The settings parser collapses empty slots
+ * before this sees the list, so a backup that moved up keeps its flag. */
+bool wm_vpn_pause_applies(const bool *flags, size_t count, int idx)
+{
+    if (flags == NULL || idx < 0 || (size_t)idx >= count ||
+        count > WM_MAX_CANDIDATES)
+    {
+        return false;
+    }
+
+    return flags[idx];
+}

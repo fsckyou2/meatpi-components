@@ -80,7 +80,7 @@ by the future button/input manager).
   into the ONE device-status group; all three cleared on `stop()`. Safe if
   dev_status_manager was never inited (its setters are no-ops then).
 
-## Settings (`"wifi_manager"`, version 6)
+## Settings (`"wifi_manager"`, version 7)
 
 `cli` (bool, default true): register this component's console command(s) with cmdline_manager on the settings boot apply (reboot-to-apply). Ownership: the component registers its own commands, main wires nothing (2026-07-05).
 
@@ -112,6 +112,7 @@ by the future button/input manager).
 | `wifi_static_tx` | int 1..64 | `8` | custom only: static TX buffers (each ~1.6 KB internal DMA) |
 | `wifi_cache_tx` | int 0..128 | `32` | custom only: cache TX buffers. Ranges match the IDF Kconfig bounds so no combination is invalid (rx_ba_win + dynamic pools are left at defaults / PSRAM) |
 | `sta_trusted` / `fallback1..5_trusted` | bool | `true` | v3 network-trust lockdown: when the CURRENT STA network is untrusted, ALL inbound admin surfaces (every /api route, the UI catch-all, every /ws channel) that arrive via the STA address return 403 / refuse the handshake. The device's own AP + the USB link are always non-STA and keep full admin (the recovery path). Outbound clients (autopid HTTP posts, MQTT) don't traverse httpd and are unaffected. Enforced by http_server_manager's per-request gate (a trampoline wrapping every route incl. WS pre-handshake); wired by main to `wifi_manager_http_request_allowed()`. Fail-closed if the request can't be classified. Use case: configure on your home network, keep the device muted on shared/office WiFi. |
+| `sta_vpn_pause` / `fallback1..5_vpn_pause` | bool | `false` | "Pause VPN" (issue #976, 2026-10-11): while the station is connected to a marked network the VPN stays down and it comes back as soon as the station leaves (vpn_manager asks `wifi_manager_sta_vpn_pause()` on its one-second lap; the lookup `wm_vpn_pause_applies()` is pure and host-tested). The flag travels with its network through the empty-slot collapse like `trusted`. Added keys with defaults: no version bump. UI: a `Pause VPN` switch under the main network's password, a `pause VPN` tick beside `trusted` on every backup network; the VPN page reports where it pauses. The pause reads the WiFi station only: a USB Ethernet uplink never pauses the VPN |
 | `power_save` | enum `none/min/max` | `none` | |
 
 `on_validate` (cross-field): rejects `sta_password` set with empty

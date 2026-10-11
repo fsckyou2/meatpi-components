@@ -429,3 +429,28 @@ void test_backoff_curve(void)
     TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(0));
     TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(-5));
 }
+
+void test_vpn_pause_applies(void)
+{
+    bool flags[WM_MAX_CANDIDATES] = { true, false, true, false, false, false };
+
+    /* no station session, an index past the configured list, an empty
+       list or no flags at all: never */
+    TEST_ASSERT_FALSE(wm_vpn_pause_applies(flags, 3, -1));
+    TEST_ASSERT_FALSE(wm_vpn_pause_applies(flags, 3, 3));
+    TEST_ASSERT_FALSE(wm_vpn_pause_applies(flags, 0, 0));
+    TEST_ASSERT_FALSE(wm_vpn_pause_applies(NULL, 3, 0));
+    TEST_ASSERT_FALSE(wm_vpn_pause_applies(flags, WM_MAX_CANDIDATES + 1, 0));
+
+    /* the connected candidate's own flag, primary or backup */
+    TEST_ASSERT_TRUE(wm_vpn_pause_applies(flags, 3, 0));
+    TEST_ASSERT_FALSE(wm_vpn_pause_applies(flags, 3, 1));
+    TEST_ASSERT_TRUE(wm_vpn_pause_applies(flags, 3, 2));
+
+    /* a backup that moved up a slot keeps its flag: the collapse is the
+       settings parser's job, the lookup only sees the collapsed list */
+    bool collapsed[WM_MAX_CANDIDATES] = { false, true };
+
+    TEST_ASSERT_TRUE(wm_vpn_pause_applies(collapsed, 2, 1));
+    TEST_ASSERT_FALSE(wm_vpn_pause_applies(collapsed, 2, 0));
+}

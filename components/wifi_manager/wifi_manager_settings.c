@@ -67,6 +67,12 @@ static const settings_field_t WM_FIELDS[] =
        the device's own AP + USB stay fully usable (meatpi 2026-07-08:
        shared/office networks must not expose configuration) */
     SETTINGS_BOOL("sta_trusted",        true),
+    /* "Pause VPN" per network (issue #976, meatpi 2026-10-11): the VPN
+       stays down while the station is on a marked network (home WiFi)
+       and comes back when it leaves. Read by vpn_manager through
+       wifi_manager_sta_vpn_pause(). Added keys fill in from the schema:
+       no version bump. */
+    SETTINGS_BOOL("sta_vpn_pause",      false),
     SETTINGS_STR ("hostname",           32, ""),
     SETTINGS_BOOL("sta_auto_reconnect", true),
     SETTINGS_INT ("sta_max_retry",      -1, 1000, -1),
@@ -103,18 +109,23 @@ static const settings_field_t WM_FIELDS[] =
     SETTINGS_STR ("fallback1_ssid",     32, ""),
     SETTINGS_STR ("fallback1_password", 64, ""),
     SETTINGS_BOOL("fallback1_trusted",  true),
+    SETTINGS_BOOL("fallback1_vpn_pause", false),
     SETTINGS_STR ("fallback2_ssid",     32, ""),
     SETTINGS_STR ("fallback2_password", 64, ""),
     SETTINGS_BOOL("fallback2_trusted",  true),
+    SETTINGS_BOOL("fallback2_vpn_pause", false),
     SETTINGS_STR ("fallback3_ssid",     32, ""),
     SETTINGS_STR ("fallback3_password", 64, ""),
     SETTINGS_BOOL("fallback3_trusted",  true),
+    SETTINGS_BOOL("fallback3_vpn_pause", false),
     SETTINGS_STR ("fallback4_ssid",     32, ""),
     SETTINGS_STR ("fallback4_password", 64, ""),
     SETTINGS_BOOL("fallback4_trusted",  true),
+    SETTINGS_BOOL("fallback4_vpn_pause", false),
     SETTINGS_STR ("fallback5_ssid",     32, ""),
     SETTINGS_STR ("fallback5_password", 64, ""),
     SETTINGS_BOOL("fallback5_trusted",  true),
+    SETTINGS_BOOL("fallback5_vpn_pause", false),
     SETTINGS_STR ("ap_ssid",            32, ""),
     /* legacy default AP password (meatpi 2026-07-18 defaults pass) */
     /* literal on purpose: the web-UI mock extractor reads this table; it is
@@ -350,6 +361,7 @@ static esp_err_t wm_on_apply(const cJSON *settings)
     copy_str(c->sta[0].ssid, WM_SSID_LEN, settings, "sta_ssid");
     copy_str(c->sta[0].password, WM_PASS_LEN, settings, "sta_password");
     c->trusted[0] = get_bool(settings, "sta_trusted", true);
+    c->vpn_pause[0] = get_bool(settings, "sta_vpn_pause", false);
     parse_sta_addr(settings, "sta", &c->sta_addr[0]);
     c->sta_count = (c->sta[0].ssid[0] != '\0') ? 1 : 0;
 
@@ -364,10 +376,12 @@ static esp_err_t wm_on_apply(const cJSON *settings)
 
         if (net.ssid[0] != '\0' && c->sta_count < WM_MAX_CANDIDATES)
         {
-            /* the trust flag + addressing travel with their network
-               through the empty-slot collapse */
+            /* the trust flag, the Pause VPN flag + addressing travel with
+               their network through the empty-slot collapse */
             snprintf(fb_key, sizeof(fb_key), "fallback%d_trusted", i);
             c->trusted[c->sta_count] = get_bool(settings, fb_key, true);
+            snprintf(fb_key, sizeof(fb_key), "fallback%d_vpn_pause", i);
+            c->vpn_pause[c->sta_count] = get_bool(settings, fb_key, false);
             snprintf(fb_key, sizeof(fb_key), "fallback%d", i);
             parse_sta_addr(settings, fb_key, &c->sta_addr[c->sta_count]);
             c->sta[c->sta_count++] = net;
