@@ -155,6 +155,15 @@ esp_err_t filesystem_list(const char *dir_path, filesystem_list_cb_t cb,
                           void *ctx);
 
 /**
+ * Paths the generic HTTP file surface (/api/fs, the Files page) must not
+ * reach: the certificate sets and the device's own backup copies, which
+ * hold key material (config_backup, 2026-10-11). True for the folder
+ * itself and anything under it; /sd compares without case (FAT). Pure:
+ * the component's own API (and every other component) is unaffected.
+ */
+bool filesystem_api_hidden(const char *path);
+
+/**
  * Validated streaming open (for chunked serving: http_server_manager).
  * Returns NULL on invalid path, unavailable backend, or fopen failure.
  * NOTE: streaming writes bypass the atomic-replace guarantee; prefer

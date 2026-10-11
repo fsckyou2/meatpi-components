@@ -585,6 +585,52 @@ and turns `0.0.0.0/0` into Route all traffic (it used to keep the first entry
 as allowed_ip + mask). The debug block carries a `Routes` row from
 `/api/vpn`. Probe: `probe_vpn_routes.mjs`.
 
+### Configuration backup (2026-10-11, issue #979)
+
+System > Maintenance opens with three cards from the on-demand chunk
+`web/backup.js` (`PAGES.__backup.cards()`, loaded by `PAGES.system` into
+the Maintenance pane ahead of the Maintenance card; the old Download Config
+and Upload Config buttons and their note are gone). Over
+`config_backup/HTTP_API.md`:
+
+- **Configuration backup**: the five parts that may leave the device as a
+  list of ticks (`.bk-row[data-part]`, a count and a size each from
+  `/api/backup/status`, the certificates row never tickable and saying
+  where they are kept), an Everything master tick, Remove sensitive data
+  and Encrypt the file switches (`.frow[data-key="bk_redact"|"bk_encrypt"]`),
+  and the file line (`.bk-file`: the name as it lands in Downloads, a
+  plain text / encrypted / passwords removed chip, the size) with the
+  Download backup link at the right (`a.bk-download`, an `href` to
+  `/api/backup?include=…&redact=1&encrypt=1` rebuilt on every change; no
+  `href` and `.disabled` while nothing is ticked or the key was never
+  downloaded, with the key nudge banner carrying the key link).
+- **Copies on the device**: the internal flash and SD card rows
+  (`.bk-place[data-where]`, refreshed time, parts, size, a Restore button
+  each; a card from another WiCAN is named and restores through its key
+  file), Refresh the copies now at the right, the `config_backup.auto_copy`
+  settings row (a real setting: Submit, restart) and the Backup key row
+  (`.frow[data-key="bk_key"]`: the key link, downloaded / never downloaded,
+  the nudge until downloaded). The key link is an `<a download>`; the
+  device marks the key downloaded when it serves it, so the cards re-read
+  the state 1.5 s after a click.
+- **Restore from a file**: Choose backup file at the right; the file goes
+  to `POST /api/backup/inspect` as a raw body and the manifest opens the
+  preview modal (`restorePreview(m)`, 640 px): the facts, the warnings
+  (`key_missing` with a Choose key file picker that posts the file's text
+  to `unlock`, `bad_key`, `other_device`, `redacted`, `newer`), for another
+  device's backup the ticks Keep this WiCAN's own names (on) and Keep this
+  WiCAN's VPN settings and keys (off), the six parts with a tick per part
+  present, the errors, and Restore and restart (`.bk-go`, disabled while
+  locked or refused; posts `include`, `keep_identity`, `keep_vpn_keys`,
+  then `expectReboot`). Cancel drops the staged backup.
+
+Rules kept: nothing applies live (the auto switch stages; a restore
+restarts), action buttons at the right edge of their row (Ali, 2026-10-11),
+no long dash. Mock: `/api/backup/*` in `mock_api.js` with
+`__mockPreset.backup` (`keyDownloaded`, `sd`, `sdDeviceId`, `copies`,
+`inspectAs`: `plain_this | enc_other | redacted | newer | v1`). Probe:
+`probe_backup.mjs` (`BACKUP PROBE PASS`, 44 checks, plain and `--min`).
+
 ## On-demand page chunks (2026-09-07)
 
 The main page must not grow (meatpi: "we cannot increase the size of the
@@ -606,7 +652,10 @@ chunk: a `web/<name>.js` that sets `PAGES.__<name>`, a stub in
 `index.html`, one more custom command + embed in `CMakeLists.txt`, one
 more asset row in `web_ui_v2.c`, and its name in `make_preview.py`'s
 chunk list. Chunks today: `scripts.js` (Scripts), `files.js` (File
-Manager) and `monitor.js` (CAN Monitor, 2026-09-07) and `setup.js` (Quick Setup, 2026-10-01).
+Manager) and `monitor.js` (CAN Monitor, 2026-09-07), `setup.js` (Quick Setup, 2026-10-01)
+and `backup.js` (the configuration backup cards of System > Maintenance,
+2026-10-11; a chunk that is not a page: the System page loads it and
+appends its cards).
 
 ## Pages
 

@@ -40,6 +40,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include "config_backup.h" /* the copies follow an upload or a delete */
 #include "filesystem.h"
 #include "http_server_manager.h"
 #include "multipart_upload.h"
@@ -71,6 +72,26 @@ static esp_err_t fs_query_path(httpd_req_t *req, char *path, size_t path_len)
     return ESP_OK;
 }
 
+/* the request's path, or false with the refusal already sent: a bad path
+   is 400, a folder the HTTP surface never reaches (the certificate sets,
+   the device's own backup copies: key material) is 404 like a missing one */
+static bool fs_take_path(httpd_req_t *req, char *path, size_t path_len)
+{
+    if (fs_query_path(req, path, path_len) != ESP_OK)
+    {
+        (void)api_send_error(req, "400 Bad Request", "invalid path");
+        return false;
+    }
+
+    if (filesystem_api_hidden(path))
+    {
+        (void)api_send_error(req, "404 Not Found", "not found");
+        return false;
+    }
+
+    return true;
+}
+
 static esp_err_t fs_error(httpd_req_t *req, esp_err_t err)
 {
     if (err == ESP_ERR_NOT_FOUND)
@@ -97,16 +118,32 @@ static esp_err_t fs_send_ok(httpd_req_t *req)
 
 /* ---- browse (list / info) -------------------------------------------------------- */
 
+typedef struct
+{
+    cJSON      *entries;
+    const char *dir;
+} fs_list_ctx_t;
+
 static esp_err_t fs_list_cb(const char *name, bool is_dir, size_t size,
                             void *ctx)
 {
-    cJSON *entries = ctx;
+    fs_list_ctx_t *l = ctx;
+    char           child[160];
+
+    /* a hidden folder is not listed either (runs under the fs lock: no fs call) */
+    snprintf(child, sizeof(child), "%s/%s", l->dir, name);
+
+    if (filesystem_api_hidden(child))
+    {
+        return ESP_OK;
+    }
+
     cJSON *entry = cJSON_CreateObject();
 
     cJSON_AddStringToObject(entry, "name", name);
     cJSON_AddBoolToObject(entry, "dir", is_dir);
     cJSON_AddNumberToObject(entry, "size", (double)size);
-    cJSON_AddItemToArray(entries, entry);
+    cJSON_AddItemToArray(l->entries, entry);
     return ESP_OK;
 }
 
@@ -114,17 +151,21 @@ static esp_err_t fs_list_handler(httpd_req_t *req)
 {
     char path[128];
 
-    if (fs_query_path(req, path, sizeof(path)) != ESP_OK)
+    if (!fs_take_path(req, path, sizeof(path)))
     {
-        return api_send_error(req, "400 Bad Request", "invalid path");
+        return ESP_OK; /* the refusal was sent */
     }
 
     cJSON *resp = cJSON_CreateObject();
 
     cJSON_AddStringToObject(resp, "path", path);
 
-    cJSON *entries = cJSON_AddArrayToObject(resp, "entries");
-    esp_err_t err = filesystem_list(path, fs_list_cb, entries);
+    fs_list_ctx_t lctx =
+    {
+        .entries = cJSON_AddArrayToObject(resp, "entries"),
+        .dir = path,
+    };
+    esp_err_t err = filesystem_list(path, fs_list_cb, &lctx);
 
     if (err != ESP_OK)
     {
@@ -139,9 +180,9 @@ static esp_err_t fs_info_handler(httpd_req_t *req)
 {
     char path[128];
 
-    if (fs_query_path(req, path, sizeof(path)) != ESP_OK)
+    if (!fs_take_path(req, path, sizeof(path)))
     {
-        return api_send_error(req, "400 Bad Request", "invalid path");
+        return ESP_OK; /* the refusal was sent */
     }
 
     size_t total = 0;
@@ -166,9 +207,9 @@ static esp_err_t fs_download_handler(httpd_req_t *req)
 {
     char path[128];
 
-    if (fs_query_path(req, path, sizeof(path)) != ESP_OK)
+    if (!fs_take_path(req, path, sizeof(path)))
     {
-        return api_send_error(req, "400 Bad Request", "invalid path");
+        return ESP_OK; /* the refusal was sent */
     }
 
     FILE *f = filesystem_open(path, "rb");
@@ -370,6 +411,7 @@ static esp_err_t fs_upload_handler(httpd_req_t *req)
     }
 
     ESP_LOGI(TAG, "uploaded %u bytes -> %s", (unsigned)ctx.len, path);
+    config_backup_touch(); /* the copies on the device follow a few seconds later */
 
     cJSON *resp = cJSON_CreateObject();
 
@@ -385,9 +427,9 @@ static esp_err_t fs_delete_handler(httpd_req_t *req)
 {
     char path[128];
 
-    if (fs_query_path(req, path, sizeof(path)) != ESP_OK)
+    if (!fs_take_path(req, path, sizeof(path)))
     {
-        return api_send_error(req, "400 Bad Request", "invalid path");
+        return ESP_OK; /* the refusal was sent */
     }
 
     esp_err_t err = filesystem_delete(path);
@@ -398,6 +440,7 @@ static esp_err_t fs_delete_handler(httpd_req_t *req)
     }
 
     ESP_LOGI(TAG, "deleted %s", path);
+    config_backup_touch();
     return fs_send_ok(req);
 }
 
@@ -405,9 +448,9 @@ static esp_err_t fs_mkdir_handler(httpd_req_t *req)
 {
     char path[128];
 
-    if (fs_query_path(req, path, sizeof(path)) != ESP_OK)
+    if (!fs_take_path(req, path, sizeof(path)))
     {
-        return api_send_error(req, "400 Bad Request", "invalid path");
+        return ESP_OK; /* the refusal was sent */
     }
 
     esp_err_t err = filesystem_mkdirs(path);

@@ -316,7 +316,8 @@ input[type="range"]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px var
   background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px;
   font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
 .btn:hover{background:var(--surface-3);border-color:var(--border-strong)}
-.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn:disabled,.btn.disabled{opacity:.45;cursor:not-allowed}
+.btn.disabled{pointer-events:none}
 .btn svg{width:14px;height:14px}
 .btn.pri{background:var(--primary);border-color:var(--primary);color:var(--on-primary)}
 .btn.pri:hover{background:var(--primary-2);border-color:var(--primary-2)}
@@ -1206,9 +1207,12 @@ const LABELS={
   sntp:"Sync time from the internet (SNTP)",ntp_server:"NTP server",ntp_server2:"Backup NTP server",sync_interval_h:"Sync interval (h)",
   poll_s:"Poll interval (s)",hold_s:"Hold to reset (s)",auth_enabled:"Require a password",auth_password:"Web password",
   uart:"UART console","usb_acm_cli.enabled":"Dongle console",
+  /* config_backup (issue #979, 2026-10-11) */
+  "config_backup.auto_copy":"Keep the copies up to date",
 };
 const HELP={
   cli:"Register this component's commands on the serial console.",
+  "config_backup.auto_copy":"After every change (a settings submit, a vehicle or parameter edit, a script, the dashboard, a certificate) the copies on the device are refreshed, part by part: a few seconds after a change the device sees, within two minutes otherwise. Nothing is written when nothing changed. Off: Refresh the copies now is the only way.",
   "script_engine.enabled":"Lets scripts run: from the Scripts page, from rules (script.run) and the console. Restart to apply.",
   "script_engine.max_runtime_ms":"A run is stopped when it takes longer than this. Sleeps count.",
   "script_engine.allow_reflash":"Lets scripts use the UDS reprogramming services (0x34–0x37, obd_transfer_file). Keep off unless you flash ECUs.",
@@ -4256,21 +4260,24 @@ PAGES.system=async(view,sub)=>{
   paneMaint.append(card("Maintenance","refresh",
     h("div",{class:"rowflex",style:"flex-wrap:wrap;gap:10px"},
       h("button",{class:"btn sm",onclick:async()=>{if(await confirmModal("Restart WiCAN now?","Reboot")){try{await api("/api/restart",{method:"POST"});}catch{}expectReboot("Restarting");}},},ic("refresh"),"Reboot"),
-      h("a",{class:"btn sm",href:API+"/api/settings/backup",download:"wican-settings.json"},ic("download"),"Download Config"),
-      h("label",{class:"btn sm"},ic("upload"),"Upload Config",
-        h("input",{type:"file",accept:".json",style:"display:none",onchange:async e=>{
-          const f=e.target.files[0];if(!f)return;
-          try{const body=JSON.parse(await f.text());const r=await api("/api/settings/backup",{method:"POST",body});
-            toast("Restored","ok");if(r&&r.reboot!==false)expectReboot("Applying backup");}
-          catch(err){toast("Restore failed: "+err.message,"err");}e.target.value="";}})),
       histBtn,
       h("button",{class:"btn sm",title:"Start over with the first-run wizard: nothing is deleted by itself",onclick:()=>{location.hash="#/setup";}},ic("sparkles"),"Run Quick Setup again"),
       h("button",{class:"btn sm danger",onclick:async()=>{
         const c=await promptModal('Type "factory-reset" to confirm: wipes ALL settings to defaults (files and SD kept)');
         if(c!=="factory-reset")return;
         try{await api("/api/settings/factory_reset",{method:"POST",body:{confirm:"factory-reset"}});expectReboot("Factory reset");}
-        catch(e2){toast(e2.message,"err");}}},"Factory Reset")),histEl,
-    note("","Download Config saves every setting (including passwords) as one JSON file: keep it private. Upload Config restores such a file and restarts the device.")));
+        catch(e2){toast(e2.message,"err");}}},"Factory Reset")),histEl));
+  /* the configuration backup (issue #979, 2026-10-11): three cards from the
+     on-demand chunk web/backup.js, ahead of Maintenance; the old Download /
+     Upload Config buttons (settings only, passwords in the clear) are gone */
+  const bk=h("div",{id:"bk-cards",style:"display:flex;flex-direction:column;gap:16px"});
+  paneMaint.prepend(bk);
+  (async()=>{
+    if(!PAGES.__backup)await loadScript("/ui/backup.js");
+    if(!PAGES.__backup){bk.append(banner("crit","alert","The backup cards could not be loaded (/ui/backup.js). Reload the page, or update the firmware."));return;}
+    try{bk.append(...await PAGES.__backup.cards());}
+    catch(e){bk.append(banner("crit","alert","Backup: "+e.message));}
+  })();
   try{paneCerts.append(await certsCard());}
   catch(e){paneCerts.append(banner("crit","alert","Certificates: "+e.message));}
   /* firmware / OTA */

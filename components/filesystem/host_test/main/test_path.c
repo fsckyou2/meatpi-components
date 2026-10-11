@@ -7,6 +7,7 @@
 #include "unity.h"
 
 #include "filesystem_private.h"
+#include "filesystem.h"
 
 void test_resolve_accepts_valid_paths(void)
 {
@@ -232,4 +233,21 @@ void test_lfs_probe_other_and_bad_input(void)
     TEST_ASSERT_EQUAL_INT(FS_LFS_OTHER, fs_lfs_probe(NULL, b1, 256, 4096, &n));
     TEST_ASSERT_EQUAL_INT(FS_LFS_OTHER, fs_lfs_probe(b0, b1, 256, 4096, NULL));
     TEST_ASSERT_EQUAL_UINT32(99, n);
+}
+
+/* the folders the HTTP file surface never reaches (config_backup, 2026-10-11) */
+void test_api_hidden_folders(void)
+{
+    TEST_ASSERT_TRUE(filesystem_api_hidden("/data/certs"));
+    TEST_ASSERT_TRUE(filesystem_api_hidden("/data/certs/homeca/client.key"));
+    TEST_ASSERT_TRUE(filesystem_api_hidden("/data/backups"));
+    TEST_ASSERT_TRUE(filesystem_api_hidden("/data/backups/latest/settings.enc"));
+    TEST_ASSERT_TRUE(filesystem_api_hidden("/sd/backups/wican-68ee8f5a653d/latest"));
+    TEST_ASSERT_TRUE(filesystem_api_hidden("/SD/Backups/x"));   /* FAT folds case */
+    TEST_ASSERT_FALSE(filesystem_api_hidden("/data/certsx"));
+    TEST_ASSERT_FALSE(filesystem_api_hidden("/data/Certs"));     /* LittleFS does not */
+    TEST_ASSERT_FALSE(filesystem_api_hidden("/data"));
+    TEST_ASSERT_FALSE(filesystem_api_hidden("/data/scripts/hello.be"));
+    TEST_ASSERT_FALSE(filesystem_api_hidden("/sd/logs"));
+    TEST_ASSERT_FALSE(filesystem_api_hidden(NULL));
 }

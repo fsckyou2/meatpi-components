@@ -17,7 +17,11 @@ Pinned design decisions (closes REVIEW.md §6.1):
 - **SD absent:** operations on `/sd/*` fail with `ESP_ERR_INVALID_STATE`; callers
   decide their own fallback policy.
 - **Writes are always atomic:** `filesystem_write()` = temp file + `fsync` +
-  `rename`, and auto-creates parent directories. A power cut leaves the old file
+  `rename`, and auto-creates parent directories.
+  On the card's FAT a `rename` over an existing file fails (errno 17), so
+  the replace there is unlink + rename (`fs_rename_replace`, 2026-10-11,
+  found under config_backup's copies): a power cut between the two calls
+  leaves the temp file beside no target, which readers treat as absent. A power cut leaves the old file
   or the new one, never a torn one.
 - **`list` is part of the API**: the settings UI needs it to enumerate candidates
   for the schema `format:"file"` keyword.

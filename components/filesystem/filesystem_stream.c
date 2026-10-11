@@ -163,7 +163,7 @@ esp_err_t filesystem_write_commit(filesystem_wstream_t *ws)
     fsync(fileno(ws->f)); /* force to media before the rename */
 
     if (fclose(ws->f) != 0 ||
-        rename(ws->tmp_path, ws->final_path) != 0)
+        fs_rename_replace(ws->tmp_path, ws->final_path) != 0)
     {
         ESP_LOGE(TAG, "stream commit '%s' failed: errno %d",
                  ws->final_path, errno);

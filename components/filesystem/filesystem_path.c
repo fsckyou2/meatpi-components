@@ -187,6 +187,61 @@ esp_err_t fs_path_parent(const char *path, char *out, size_t out_len)
     return ESP_OK;
 }
 
+/* the folders the HTTP file surface never reaches (key material lives there) */
+static const struct
+{
+    const char *prefix;
+    bool        fold_case; /* FAT on the card is case-insensitive */
+} HIDDEN[] =
+{
+    { "/data/certs",   false },
+    { "/data/backups", false },
+    { "/sd/backups",   true  },
+};
+
+static int prefix_cmp(const char *a, const char *b, size_t n, bool fold)
+{
+    for (size_t i = 0; i < n; i++)
+    {
+        int ca = (unsigned char)a[i];
+        int cb = (unsigned char)b[i];
+
+        if (fold)
+        {
+            ca = (ca >= 'A' && ca <= 'Z') ? ca + 32 : ca;
+            cb = (cb >= 'A' && cb <= 'Z') ? cb + 32 : cb;
+        }
+
+        if (ca != cb || ca == 0)
+        {
+            return ca - cb;
+        }
+    }
+
+    return 0;
+}
+
+bool filesystem_api_hidden(const char *path)
+{
+    if (path == NULL)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < sizeof(HIDDEN) / sizeof(HIDDEN[0]); i++)
+    {
+        size_t len = strlen(HIDDEN[i].prefix);
+        int    cmp = prefix_cmp(path, HIDDEN[i].prefix, len, HIDDEN[i].fold_case);
+
+        if (cmp == 0 && (path[len] == '\0' || path[len] == '/'))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool fs_region_is_blank(const uint8_t *buf, size_t len)
 {
     if (buf == NULL || len == 0)

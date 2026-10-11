@@ -88,6 +88,14 @@ device-to-device transfer (2026-07-05). Served with a
 `Content-Disposition: attachment` filename so browsers save it as
 `wican-<device_id>-settings.json`.
 
+Since 2026-10-11 the web UI uses `config_backup`'s `/api/backup` instead
+(`config_backup/HTTP_API.md`): the same settings export as one part of a
+file that also carries the vehicles, the databases, the scripts and the
+dashboard, with the secrets optional and a seal optional. This route stays
+for tools and older clients; its document (`wican_backup: 1`) restores
+through `POST /api/backup/inspect` as the settings part, and through the
+POST below as before.
+
 **Response 200**
 ```json
 {

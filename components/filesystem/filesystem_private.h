@@ -133,6 +133,9 @@ void fs_unlock(void);
 uint8_t *fs_scratch(size_t *size_out); /* internal-RAM bounce buffer;
                                           use under fs_lock only */
 esp_err_t fs_errno_to_esp(int err);
+/** rename(2) that replaces an existing target on FAT too (unlink first on
+ *  EEXIST); 0 or -1 with errno. */
+int fs_rename_replace(const char *tmp, const char *path);
 
 /** Start the async-pipe writer service (called by filesystem_init). */
 esp_err_t fs_stream_service_init(void);

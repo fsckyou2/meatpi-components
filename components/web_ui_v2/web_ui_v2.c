@@ -52,6 +52,9 @@ extern const uint8_t monitor_gz_end[]   asm("_binary_monitor_js_gz_end");
 /* the Quick Setup wizard chunk (web/setup.js, 2026-10-01) */
 extern const uint8_t setup_gz_start[] asm("_binary_setup_js_gz_start");
 extern const uint8_t setup_gz_end[]   asm("_binary_setup_js_gz_end");
+/* the configuration backup cards chunk (web/backup.js, 2026-10-11) */
+extern const uint8_t backup_gz_start[] asm("_binary_backup_js_gz_start");
+extern const uint8_t backup_gz_end[]   asm("_binary_backup_js_gz_end");
 
 static const http_asset_t ASSETS[] =
 {
@@ -76,6 +79,9 @@ static const http_asset_t ASSETS[] =
     { .uri = "/ui/setup.js", .content_type = "application/javascript",
       .data_start = setup_gz_start, .data_end = setup_gz_end,
       .content_encoding = "gzip" },
+    { .uri = "/ui/backup.js", .content_type = "application/javascript",
+      .data_start = backup_gz_start, .data_end = backup_gz_end,
+      .content_encoding = "gzip" },
     /* Optional UI extras the page installs on demand (2026-09-06): the
      * dashboard's chart library (uPlot, ~50 KB) is uploaded through
      * /api/fs/upload into <store>/cache/www/ and served from here with the
@@ -93,12 +99,13 @@ esp_err_t web_ui_v2_register(void)
 
     if (err == ESP_OK)
     {
-        ESP_LOGI(TAG, "v2 web UI registered (%u bytes gzipped + %u + %u + %u + %u chunks)",
+        ESP_LOGI(TAG, "v2 web UI registered (%u bytes gzipped + %u + %u + %u + %u + %u chunks)",
                  (unsigned)(index_gz_end - index_gz_start),
                  (unsigned)(scripts_gz_end - scripts_gz_start),
                  (unsigned)(files_gz_end - files_gz_start),
                  (unsigned)(monitor_gz_end - monitor_gz_start),
-                 (unsigned)(setup_gz_end - setup_gz_start));
+                 (unsigned)(setup_gz_end - setup_gz_start),
+                 (unsigned)(backup_gz_end - backup_gz_start));
     }
     return err;
 }

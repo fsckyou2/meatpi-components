@@ -340,7 +340,7 @@ esp_err_t filesystem_write(const char *path, const void *data, size_t len)
         return ESP_FAIL;
     }
 
-    if (rename(tmp, path) != 0)
+    if (fs_rename_replace(tmp, path) != 0)
     {
         ESP_LOGE(TAG, "rename '%s' -> '%s' failed: errno %d",
                  tmp, path, errno);
@@ -379,6 +379,31 @@ uint8_t *fs_scratch(size_t *size_out)
 {
     *size_out = sizeof(s_scratch);
     return s_scratch;
+}
+
+/* FAT (the card) refuses to rename over an existing file (errno 17, found
+   2026-10-11 under config_backup's copies); LittleFS replaces in one step.
+   The unlink costs FAT the one-step replace: a power cut between the two
+   calls leaves the temp file beside no target, which every reader treats as
+   absent (config_backup rewrites its copy at the next sweep). */
+int fs_rename_replace(const char *tmp, const char *path)
+{
+    if (rename(tmp, path) == 0)
+    {
+        return 0;
+    }
+
+    if (errno != EEXIST)
+    {
+        return -1;
+    }
+
+    if (unlink(path) != 0 && errno != ENOENT)
+    {
+        return -1;
+    }
+
+    return rename(tmp, path);
 }
 
 esp_err_t fs_errno_to_esp(int err)
