@@ -1,24 +1,37 @@
 # espnetlink_link
 
 The ESPNetLink LTE/GPS dongle as the WiCAN's internet uplink: **zero-touch
-pairing over USB**, then either the **WiFi-modem** topology (default: the USB
-cable carries 5 V only, the dongle is reached over its own WiFi AP) or plain
-**USB-Ethernet** (`usb_ncm` / `usb_rndis`: the dongle stays a USB-Ethernet
-adapter (CDC-NCM or RNDIS) on the `usb_host_manager` uplink; the pairing
-pass sets the dongle's `usb_dev_ethernet.class` to match). Feature layer; sits above `wifi_manager`,
+pairing over USB**, then either plain **USB-Ethernet** (`usb_rndis`, the
+default since 2026-10-12, or `usb_ncm`: the dongle stays a USB-Ethernet
+adapter (RNDIS or CDC-NCM) on the `usb_host_manager` uplink; the pairing
+pass sets the dongle's `usb_dev_ethernet.class` and LTE sharing to match,
+and a fresh dongle ships both, so nothing restarts) or the **WiFi-modem**
+topology (the dongle's USB data is cut after each pairing pass and it is
+reached over its own WiFi AP). Feature layer; sits above `wifi_manager`,
 `usb_host_manager`/`usb_eth_host`, `http_client_manager`, `settings_manager`.
 
-Why two modes: the WiCAN's USB host transmitter desenses the dongle's GNSS
-while the USB-Ethernet link is active, a cold fix never completes
+Why two topologies: the WiCAN's USB host transmitter desenses the dongle's
+GNSS while the USB-Ethernet link is active, a cold fix takes longer
 (espnetlink-fw `docs/espnetlink_wifi_mode_howto.md`). With the data lines
 cut at the dongle's mux and the WiCAN joined to the dongle's AP, internet
 still flows (the dongle NATs its AP into LTE) and GPS rides `GET /api/gps`.
 
+**2026-10-12: nothing about a cut persists on the dongle any more** (its
+boot-cut hint and 60 s self-restore are gone, `power_only` became
+`console`): a dongle boots with its USB data on in every mode, so a user
+who forgot its AP password always has the USB link, and a WiCAN in
+`wifi_modem` mode runs identify, key read and cut at EVERY dongle boot
+(about 10 to 20 s of USB after power-on; an unchanged key costs it
+nothing). A dongle set to `usb_mode=console` presents its CDC console
+alone on USB: the WiCAN reports it (`dongle_console`) and never pairs over
+USB; a stored key still works over the AP.
+
 Contract: espnetlink-fw `docs/espnetlink_wican_integration.md` (dongle
-branch `refactor`, `components/wifi_modem/`). Dongle identity on USB:
-**VID `0x303A` PID `0x4007`**; its address on the NCM link `192.168.7.1`
-(the WiCAN gets `192.168.7.2/24` by DHCP: address + netmask only, no
-router unless `ncm_share`); its AP `ESPNetLink_<id6>` at `192.168.80.1`.
+branch `main`, `components/wifi_modem/`). Dongle identity on USB:
+**VID `0x303A` PID `0x4007`**; its address on the USB link `192.168.7.1`
+(the WiCAN gets `192.168.7.2/24` by DHCP, with router + DNS since the
+dongle's `ncm_share` defaults to true again); its AP `ESPNetLink_<id6>`
+at `192.168.80.1`.
 
 ## The zero-touch sequence (`mode=wifi_modem`, `auto_pair=true`)
 
@@ -56,21 +69,28 @@ Rules (contract §3) as implemented by the pure machine in
 | `foreign` | ignore until the device re-plugs |
 | `ncm_share` / `ncm_up` | `usb_ncm` mode only, see below |
 
-**Boot-cut steady state (2026-08-24).** The first cut arms the dongle's
-`wifi_modem.boot_cut` hint: every later dongle boot cuts its data lines
-at ~3 s, before its USB stack starts, this component then sees NO USB
-device at all (`pair_state=idle` while paired + on the AP is the normal
-steady state), and GPS acquires from the dongle's power-on with a quiet
-bus. The dongle self-restores its USB after 60 s without an AP client (a
-PC gets tethering back; a stale-key WiCAN gets its read channel), so
-VBUS-cycle recovery is ~75 s worst case. The WiCAN also no longer
-VBUS-power-cycles at host start (usb_eth_host 2026-08-24): a WiCAN
-reboot never reboots the dongle or costs its fix.
+**The steady state since 2026-10-12.** Every dongle boot enumerates (the
+cut never persists), so a paired WiCAN runs the sequence again: identify,
+key read (unchanged: no store, no restart), cut, `done`; between dongle
+boots `pair_state=done` with the cable power-only and the STA on the AP.
+(From 2026-08-24 to 2026-10-12 the first cut armed a boot-cut hint on the
+dongle, every later dongle boot cut at 3 s and this component saw no USB
+device at all; a user who forgot the dongle's AP password then had no way
+in, which is why the hint is gone.) The WiCAN does not VBUS-power-cycle at
+host start (usb_eth_host 2026-08-24): a WiCAN reboot never reboots the
+dongle or costs its fix.
 
 Recovery = `usb_host_manager_set_vbus(false)` 1 s `true` (the dongle
 re-boots and re-enumerates), spaced ≥ 60 s and at most 3 per unbroken
 failure run, then it gives up until the next re-plug (`GIVE_UP`). The
-operator's `repair` always spends one cycle. **AP stale** = paired + dongle
+operator's `repair` always spends one cycle. **The USB-mode kick
+(2026-10-12):** in `usb_rndis` / `usb_ncm`, a dongle on the port (ID pin)
+that never enumerates within 30 s while the machine is idle had its data
+lines cut by an earlier wifi_modem pass (a runtime cut lasts until the
+dongle's next boot) and this WiCAN is not on its AP to restore them: one
+VBUS cycle, once per presence (a re-plug earns another), brings it back
+with USB on, so a user who just switched modes does not wait for the next
+car start (`espnl_core_usb_kick_due`, host-tested). **AP stale** = paired + dongle
 present (ID pin) + cut + STA not suspended by policy, yet the STA sits on
 NO network for 180 s → the stored key is presumed rotated → one cycle →
 the key is re-read. A VBUS cycle (or 3 consecutive failed polls on a
@@ -151,17 +171,18 @@ also up; the host attaches whichever class enumerates: `cdc_ncm` or
 router + DNS + NAPT) and `usb_dev_ethernet.class` (`ncm`/`rndis` per our
 mode; 404 = pre-2026-08-25 dongle firmware, logged and left on its
 built-in class), PUTs whichever differs and `POST /api/settings/submit`s
-ONCE (the dongle reboots once to apply). GPS and health are polled over
-the USB link at `192.168.7.1`. Switching here from `wifi_modem` finds the
-dongle's data lines cut (boot-cut re-cuts them on every dongle boot, and
-with the WiCAN on its AP the dongle's 60 s no-station fallback never
-fires): the link task then restores them over the AP: dongle health
-`usb_data=0` -> `POST /api/wifi_modem/usb_data {"enabled":true}` (clears
-the boot-cut hint; retried every 15 s), USB enumerates, the machine takes
-over. Note the dongle keeps `ncm_share=true` and
-the class after switching back to `wifi_modem` (a PC on that dongle would
-then tether through LTE over that class): change them on the dongle if
-that matters.
+ONCE (the dongle reboots once to apply). A fresh dongle ships `rndis` +
+`ncm_share=true` (2026-10-12), so the default pair changes nothing and
+restarts nothing. GPS and health are polled over the USB link at
+`192.168.7.1`. Switching here from `wifi_modem` within one dongle boot
+finds the dongle's data lines cut (a runtime cut lasts until the dongle
+restarts): the link task restores them over the AP: dongle health
+`usb_data=0` -> `POST /api/wifi_modem/usb_data {"enabled":true}` (retried
+every 15 s), USB enumerates, the machine takes over; after a dongle
+restart the lines are on anyway. Note the dongle keeps `ncm_share=true`
+and the class after switching back to `wifi_modem` (a PC on that dongle
+would then tether through LTE over that class): change them on the
+dongle if that matters.
 
 ## API
 
@@ -210,7 +231,7 @@ gained the GPS fallback provider; `wifi_manager_sta_reconnect()`.
 | Key | Type / default | Notes |
 |---|---|---|
 | `enabled` | bool `true` | the link task runs (v1 default was false) |
-| `mode` | `wifi_modem` \| `usb_ncm` \| `usb_rndis`, `wifi_modem` | see above |
+| `mode` | `wifi_modem` \| `usb_ncm` \| `usb_rndis`, `usb_rndis` (was `wifi_modem` until 2026-10-12; a stored value persists across updates) | see above |
 | `auto_pair` | bool `true` | zero-touch over USB; false = manual `pair` only, USB link left alone |
 | `ssid` | str ≤32 `""` | the dongle's AP (written by pairing) |
 | `device_id` | str ≤12 `""` | the paired dongle (written by pairing) |
@@ -251,7 +272,19 @@ drops: phase-2 exemption not built).
 
 ## Testing
 
-Host suite (`host_test/`, **26 tests**): identity, SSID match, the
+The garage story (2026-10-12, `tools/testbench/wifi/espnetlink_garage_bench.py`,
+`ESPNL GARAGE PASS`): the car on the home WiFi, away on the dongle's LTE with
+the VPN to betty and the data through the tunnel, home again, flaps, a dongle
+reboot while away, sleep and wake both ways; the DUT is observed through the
+betty tunnel while away and the default route is judged at a receiver on
+betty by the source address of every POST. Its g6 leg found the USB class
+rx-thread disconnect race (fixed in the vendored net class drivers,
+`cherryusb/PROVENANCE.md`); `tools/testbench/usb/espnetlink_repair_hammer.py`
+(`ESPNL REPAIR HAMMER PASS`) repeats `POST /api/espnetlink/repair` with
+traffic on the wire as the proof.
+
+Host suite (`host_test/`, **33 tests** since 2026-10-12: the health's
+`usb_ethernet`, the console-only predicate, the USB-mode kick rule): identity, SSID match, the
 `/api/wifi_modem` / `/api/info` / credentials parsers (escapes, 403 body,
 oversize), the changed-key compare, URL build, the shared GPS parser with
 the HTTP document shape, the v1→v2 migration, and the pairing machine

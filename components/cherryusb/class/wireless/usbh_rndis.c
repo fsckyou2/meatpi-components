@@ -24,6 +24,35 @@
 
 static struct usbh_rndis g_rndis_class;
 
+/* WiCAN (2026-10-12): the rx thread runs above the hub thread's priority.
+ * When its bulk-in urb is killed by the disconnect it loops back to
+ * find_class and issues a control transfer on the port, and
+ * usbh_hubport_release() deletes that port's mutex right after the class
+ * disconnect returns: the thread's mutex give then aborted
+ * (spinlock_acquire, task usbh_rndis_rx; a VBUS cycle of the ESPNetLink
+ * while the wire carried the VPN, the garage bench). The thread leaves as
+ * soon as the port disconnects and the disconnect waits for it, longer
+ * than one control transfer timeout. */
+static volatile bool g_rndis_rx_thread_alive;
+static volatile bool g_rndis_disconnecting;
+
+static bool usbh_rndis_rx_should_stop(void)
+{
+    struct usbh_hubport *hport = g_rndis_class.hport;
+
+    return hport == NULL || !hport->connected || g_rndis_disconnecting;
+}
+
+static void usbh_rndis_wait_rx_thread(void)
+{
+    for (int i = 0; i < 300 && g_rndis_rx_thread_alive; i++) {
+        usb_osal_msleep(10);
+    }
+    if (g_rndis_rx_thread_alive) {
+        USB_LOG_WRN("rndis rx thread still up 3 s after the disconnect\r\n");
+    }
+}
+
 static bool usbh_rndis_is_ready(const struct usbh_rndis *rndis_class)
 {
     return rndis_class && rndis_class->hport && rndis_class->bulkin && rndis_class->bulkout;
@@ -420,6 +449,7 @@ static int usbh_rndis_connect(struct usbh_hubport *hport, uint8_t intf)
     strncpy(hport->config.intf[intf].devname, DEV_FORMAT, CONFIG_USBHOST_DEV_NAMELEN);
 
     USB_LOG_INFO("Register RNDIS Class:%s\r\n", hport->config.intf[intf].devname);
+    g_rndis_disconnecting = false;
     usbh_rndis_run(rndis_class);
     return ret;
 query_errorout:
@@ -434,6 +464,7 @@ static int usbh_rndis_disconnect(struct usbh_hubport *hport, uint8_t intf)
     struct usbh_rndis *rndis_class = (struct usbh_rndis *)hport->config.intf[intf].priv;
 
     if (rndis_class) {
+        g_rndis_disconnecting = true;
         if (rndis_class->bulkin) {
             usbh_kill_urb(&rndis_class->bulkin_urb);
         }
@@ -445,6 +476,8 @@ static int usbh_rndis_disconnect(struct usbh_hubport *hport, uint8_t intf)
         // if (rndis_class->intin) {
         //     usbh_kill_urb(&rndis_class->intin_urb);
         // }
+
+        usbh_rndis_wait_rx_thread();
 
         if (hport->config.intf[intf].devname[0] != '\0') {
             usb_osal_thread_schedule_other();
@@ -479,11 +512,12 @@ void usbh_rndis_rx_thread(CONFIG_USB_OSAL_THREAD_SET_ARGV)
     (void)CONFIG_USB_OSAL_THREAD_GET_ARGV;
 
     USB_LOG_INFO("Create rndis rx thread\r\n");
+    g_rndis_rx_thread_alive = true;
     // clang-format off
 find_class:
     // clang-format on
     g_rndis_class.connect_status = false;
-    if (usbh_find_class_instance("/dev/rndis") == NULL || !g_rndis_class.hport) {
+    if (usbh_find_class_instance("/dev/rndis") == NULL || usbh_rndis_rx_should_stop()) {
         goto delete;
     }
 
@@ -564,6 +598,7 @@ find_class:
     // clang-format off
 delete:
     USB_LOG_INFO("Delete rndis rx thread\r\n");
+    g_rndis_rx_thread_alive = false;
     usb_osal_thread_delete(NULL);
     // clang-format on
 }

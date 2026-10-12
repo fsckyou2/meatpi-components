@@ -80,6 +80,7 @@ esp_err_t espnl_pair_store(const char *ssid, const char *password,
 typedef struct
 {
     bool     attached;        /**< NCM up to a 303A:4007 device          */
+    bool     dongle_console;  /**< 303A:4007 as a CDC console alone      */
     const char *state;        /**< espnl_sm_state_str()                  */
     bool     ncm_steady;      /**< usb_ncm mode: dongle usable over USB  */
     uint32_t cuts;

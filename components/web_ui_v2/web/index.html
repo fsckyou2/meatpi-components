@@ -1253,7 +1253,7 @@ const HELP={
   std_protocol:"Used for standard PIDs and the PID scan. Automatic lets the chip find the vehicle's protocol. A fixed protocol is never sent onto a bus that runs at another bit rate: polling pauses instead. 29-bit filters need a 29-bit protocol.",
   vehicle:"Name of the vehicle profile on this device. Choose profile searches the latest published list; the name stays editable.",
   min_event_interval_ms:"Rate limit for parameter-change events fed to rules.",
-  "espnetlink.mode":"WiFi modem keeps the dongle's USB as power only (best GPS reception). USB Ethernet keeps the data lines on and uses the cable as the uplink.",
+  "espnetlink.mode":"USB Ethernet (RNDIS, the default) keeps the data lines on and uses the cable as the uplink; the dongle ships ready for it. WiFi modem cuts the dongle's USB data after each pairing (best GPS reception): WiCAN re-pairs at every dongle boot, nothing persists on the dongle.",
   auto_pair:"Read the dongle's AP key over USB automatically the first time it is plugged in.",
   cut_retries:"How many times to retry cutting the dongle's USB data lines before giving up.",
   "espnetlink.apn":"Only if your carrier gave you one: most SIMs work without it. WiCAN sends it to the dongle the next time the dongle is on the cable; the dongle restarts once to apply it. Blank keeps the dongle's own.",
@@ -1302,7 +1302,7 @@ const ENUMS={
   ap_bandwidth:{ht20:"20 MHz",ht40:"40 MHz"},power_save:{none:"Off (best latency)",min:"Minimum",max:"Maximum"},
   wifi_ram_profile:{full:"Full",lean:"Lean (recommended with Bluetooth)",custom:"Custom"},
   ip_mode:{dhcp:"Automatic (DHCP)",static:"Static IP"},sta_ip_mode:{dhcp:"Automatic (DHCP)",static:"Static IP"},
-  "espnetlink.mode":{wifi_modem:"WiFi modem (USB power only)",usb_ncm:"USB Ethernet (NCM)",usb_rndis:"USB Ethernet (RNDIS)"},
+  "espnetlink.mode":{wifi_modem:"WiFi modem (USB cut after pairing)",usb_ncm:"USB Ethernet (NCM)",usb_rndis:"USB Ethernet (RNDIS, default)"},
   role:{host:"Host: adapter or dongle plugs in",device:"Device: network over the cable to a PC"},
   device_class:{ncm:"CDC-NCM (Linux / macOS / Windows 11)",rndis:"RNDIS (older Windows)",cdc:"CDC serial"},
   conn_profile:{ios:"iOS",android_fast:"Android (fast)"},pause_mode:{all:"Pause everything",requests_only:"Pause requests only"},
@@ -4006,7 +4006,7 @@ PAGES.usb=async(view,sub)=>{
     if(!haveNl){nlKv.replaceChildren(h("div",{class:"help"},"ESPNetLink support is not in this build."));return;}
     const e=nl,pst=(e.usb||{}).pair_state||"",up=UPL[e.uplink]||[e.uplink,""],u=lastUsb||{};
     const usbMode=e.mode==="usb_ncm"||e.mode==="usb_rndis";
-    const modeLabel=e.mode==="usb_ncm"?"USB Ethernet (NCM)":e.mode==="usb_rndis"?"USB Ethernet (RNDIS)":"WiFi modem (USB = power only)";
+    const modeLabel=e.mode==="usb_ncm"?"USB Ethernet (NCM)":e.mode==="usb_rndis"?"USB Ethernet (RNDIS)":"WiFi modem (USB cut after pairing)";
     /* idle in a USB mode is simply "no link yet", not a cut */
     const ps=(pst==="idle"&&usbMode)?["Waiting for the USB-Ethernet link",""]:(PST[pst]||[pst||"-",""]);
     const d=e.dongle||{},g=e.gps||{};
@@ -4022,6 +4022,8 @@ PAGES.usb=async(view,sub)=>{
     else if(pst==="hold")notes.push(note("warn","Pairing is on hold: "+(e.last_error||"the dongle key cannot be stored right now.")));
     if(pst==="unsupported"||fwOld)notes.push(note("warn","The dongle firmware is older than this WiCAN expects"+(e.dongle_fw?" ("+e.dongle_fw+")":"")+". Update the dongle firmware, then plug it in again."+(e.last_error&&pst==="unsupported"?" Detail: "+e.last_error:"")));
     if(clsMismatch)notes.push(note("warn","The dongle presents "+(DRV[u.driver]||u.driver)+" although "+modeLabel+" is selected. "+(e.last_error||"The dongle reboots once to switch its USB class; if this persists, update the dongle firmware.")));
+    /* dongle api 9 (2026-10-12): usb_mode=console presents the CDC console alone */
+    if((e.usb||{}).dongle_console)notes.push(note("warn","The dongle is in console mode: its USB port carries only the console, no USB Ethernet, so nothing can be paired over USB. WiCAN still uses the dongle's Wi-Fi with a stored key. For zero-touch pairing set the dongle's USB mode to auto (on its console: wifi_modem -u auto, then restart it)."));
     const errInNote=pst==="hold"||pst==="unsupported"||clsMismatch;
     const nlRows=[
       ["Enabled",e.enabled?"yes":"no"],
@@ -4173,7 +4175,7 @@ PAGES.usb=async(view,sub)=>{
   paneStatus.append(cardTools("ESPNetLink","signal",
     [h("button",{class:"btn sm",onclick:repair,title:"VBUS cycle: the dongle re-enumerates and its AP key is read again"},ic("refresh"),"Re-pair")],
     nlKv,
-    note("","WiFi modem (default): the dongle's USB cable carries power only: the WiCAN reads the dongle's AP key over USB once, cuts the data lines (the USB host desenses the dongle's GPS), then joins the dongle's Wi-Fi AP for internet (LTE) and GPS. USB Ethernet (NCM or RNDIS): the data lines stay on and the dongle is a USB-Ethernet uplink presenting the selected class (the WiCAN switches the dongle’s USB class and LTE sharing automatically: the dongle reboots once to apply)."),
+    note("","USB Ethernet (RNDIS, the default): the data lines stay on and the dongle is a USB-Ethernet uplink presenting the selected class; a dongle fresh from the box already matches, otherwise the WiCAN switches its USB class and LTE sharing and the dongle reboots once. WiFi modem: the WiCAN reads the dongle's AP key over USB, cuts the data lines (the USB host desenses the dongle's GPS) and joins the dongle's Wi-Fi AP for internet (LTE) and GPS; the dongle boots with USB on every time, so this repeats at every dongle boot and a forgotten dongle password never locks anyone out."),
     manual));
   const nlStatusCard=card("LTE & GPS","signal",nlEl,nlOff);
   paneStatus.append(nlStatusCard);

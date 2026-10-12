@@ -147,6 +147,76 @@ void test_health_parse_lte_down(void)
     TEST_ASSERT_EQUAL_INT(0, h.ap_clients);
 }
 
+/* dongle api 9 (2026-10-12): `usb_ethernet` says whether the USB Ethernet
+ * function is there at all; an older dongle has no key = always there */
+void test_health_parse_usb_ethernet(void)
+{
+    static const char *CONSOLE =
+        "{\"usb_mode\":\"console\",\"usb_data\":true,\"usb_ethernet\":false,"
+        "\"napt\":true,\"lte\":{\"valid\":false},"
+        "\"gps\":{\"valid\":false,\"fix\":false}}";
+    static const char *AUTO =
+        "{\"usb_mode\":\"auto\",\"usb_data\":true,\"usb_ethernet\":true,"
+        "\"napt\":true}";
+    espnl_health_t h;
+
+    TEST_ASSERT_TRUE(espnl_core_parse_health(CONSOLE, &h));
+    TEST_ASSERT_FALSE(h.usb_ethernet);
+    TEST_ASSERT_TRUE(h.usb_data);
+    TEST_ASSERT_TRUE(espnl_core_parse_health(AUTO, &h));
+    TEST_ASSERT_TRUE(h.usb_ethernet);
+    /* the api 8 document has no such key */
+    TEST_ASSERT_TRUE(espnl_core_parse_health(HEALTH_LTE_DOWN, &h));
+    TEST_ASSERT_TRUE(h.usb_ethernet);
+}
+
+/* a dongle in usb_mode=console on the port: its identity with no USB
+ * Ethernet class bound; everything else is not that */
+void test_console_only_predicate(void)
+{
+    TEST_ASSERT_TRUE(espnl_core_is_console_only(true, 0x303A, 0x4007, false));
+    /* the same device once its RNDIS/NCM driver is bound */
+    TEST_ASSERT_FALSE(espnl_core_is_console_only(true, 0x303A, 0x4007, true));
+    /* nothing on the port */
+    TEST_ASSERT_FALSE(espnl_core_is_console_only(false, 0x303A, 0x4007, false));
+    /* the boot-window serial-JTAG, a GPS puck, a USB-Ethernet adapter */
+    TEST_ASSERT_FALSE(espnl_core_is_console_only(true, 0x303A, 0x1001, false));
+    TEST_ASSERT_FALSE(espnl_core_is_console_only(true, 0x1546, 0x01A7, false));
+    TEST_ASSERT_FALSE(espnl_core_is_console_only(true, 0x0B95, 0x772B, true));
+}
+
+/* a USB mode with the dongle on the port but never enumerated gets one
+ * VBUS kick after ESPNL_USB_KICK_TICKS, and only then */
+void test_usb_kick_due(void)
+{
+    const int T = ESPNL_USB_KICK_TICKS;
+
+    TEST_ASSERT_TRUE(espnl_core_usb_kick_due(true, true, true, false, false,
+                                             true, T, false));
+    TEST_ASSERT_TRUE(espnl_core_usb_kick_due(true, true, true, false, false,
+                                             true, T + 5, false));
+    /* not yet */
+    TEST_ASSERT_FALSE(espnl_core_usb_kick_due(true, true, true, false, false,
+                                              true, T - 1, false));
+    /* wifi_modem: the AP-stale logic owns recovery there */
+    TEST_ASSERT_FALSE(espnl_core_usb_kick_due(false, true, true, false, false,
+                                              true, T, false));
+    /* enumerated, or a console-only dongle, or the machine busy */
+    TEST_ASSERT_FALSE(espnl_core_usb_kick_due(true, true, true, true, false,
+                                              true, T, false));
+    TEST_ASSERT_FALSE(espnl_core_usb_kick_due(true, true, true, false, true,
+                                              true, T, false));
+    TEST_ASSERT_FALSE(espnl_core_usb_kick_due(true, true, true, false, false,
+                                              false, T, false));
+    /* host down, nothing on the pin, or already kicked */
+    TEST_ASSERT_FALSE(espnl_core_usb_kick_due(true, false, true, false, false,
+                                              true, T, false));
+    TEST_ASSERT_FALSE(espnl_core_usb_kick_due(true, true, false, false, false,
+                                              true, T, false));
+    TEST_ASSERT_FALSE(espnl_core_usb_kick_due(true, true, true, false, false,
+                                              true, T, true));
+}
+
 void test_health_parse_garbage(void)
 {
     espnl_health_t h;
@@ -339,6 +409,9 @@ void app_main(void)
     RUN_TEST(test_health_parse);
     RUN_TEST(test_health_parse_lte_down);
     RUN_TEST(test_health_parse_sim_states);
+    RUN_TEST(test_health_parse_usb_ethernet);
+    RUN_TEST(test_console_only_predicate);
+    RUN_TEST(test_usb_kick_due);
     RUN_TEST(test_health_parse_garbage);
     RUN_TEST(test_info_parse);
     RUN_TEST(test_credentials_parse);

@@ -171,6 +171,7 @@ esp_err_t espnetlink_link_status(espnetlink_link_status_t *out)
     xSemaphoreGive(s_lock);
 
     out->usb_attached = usb.attached;
+    out->dongle_console = usb.dongle_console;
     out->pair_state = usb.state;
     out->cuts = usb.cuts;
     out->vbus_cycles = usb.vbus_cycles;
@@ -425,11 +426,12 @@ static void poll_health(const char *host)
 }
 
 /* usb_ncm / usb_rndis mode reached over the dongle's AP with its data
- * lines cut (the normal state after wifi_modem + boot-cut): restore them
- * over WiFi, POST /api/wifi_modem/usb_data {"enabled":true}. The dongle
- * releases its mux at once AND clears the boot-cut hint, so USB
- * re-enumerates and the machine can bring the USB-Ethernet uplink up.
- * Rate-limited by the caller. Returns true on a 200. */
+ * lines cut (a runtime cut from an earlier wifi_modem pass, which lasts
+ * until the dongle's next boot): restore them over WiFi, POST
+ * /api/wifi_modem/usb_data {"enabled":true}. The dongle releases its mux
+ * at once, so USB re-enumerates and the machine can bring the
+ * USB-Ethernet uplink up without a dongle restart. Rate-limited by the
+ * caller. Returns true on a 200. */
 static bool ap_restore_usb_data(const char *host)
 {
     char url[64];
@@ -459,12 +461,12 @@ static bool ap_restore_usb_data(const char *host)
     if (err != ESP_OK || status != 200)
     {
         ESP_LOGW(TAG, "usb_data restore over AP: %s status %d (dongle "
-                 "usb_mode power_only?)", esp_err_to_name(err), status);
+                 "usb_mode ncm?)", esp_err_to_name(err), status);
         return false;
     }
 
-    ESP_LOGI(TAG, "usb mode: dongle data lines restored over the AP "
-             "(boot-cut hint cleared), waiting for USB enumeration");
+    ESP_LOGI(TAG, "usb mode: dongle data lines restored over the AP, "
+             "waiting for USB enumeration");
     return true;
 }
 
@@ -647,9 +649,9 @@ static void link_task(void *arg)
         }
 
         /* 5. usb_ncm / usb_rndis mode but the dongle's data lines are cut
-         *    (paired under wifi_modem earlier: boot-cut keeps them cut
-         *    on every dongle boot, and with us on its AP the dongle's
-         *    60 s no-station fallback never fires): restore over WiFi. */
+         *    (a wifi_modem pass cut them earlier in this dongle boot; the
+         *    cut lasts until the dongle restarts): restore over WiFi so
+         *    the switch needs no dongle restart. */
         if (cfg->mode != ESPNETLINK_MODE_WIFI_MODEM &&
             uplink == ESPNETLINK_UPLINK_ESPNETLINK_AP &&
             (int32_t)(t - next_restore_ms) >= 0)

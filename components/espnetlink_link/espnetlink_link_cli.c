@@ -90,10 +90,11 @@ static int cmd_espnetlink(int argc, char **argv)
                    st.dongle_fw[0] ? st.dongle_fw : "-", st.dongle_api,
                    (st.dongle_api != 0 && st.dongle_api < ESPNL_MIN_API_LEVEL)
                        ? " (older than this WiCAN expects)" : "");
-    cmdline_printf("  usb: attached=%d pair_state=%s cuts=%lu "
+    cmdline_printf("  usb: attached=%d console_only=%d pair_state=%s cuts=%lu "
                    "vbus_cycles=%lu errors=%lu\n",
-                   (int)st.usb_attached, st.pair_state,
-                   (unsigned long)st.cuts, (unsigned long)st.vbus_cycles,
+                   (int)st.usb_attached, (int)st.dongle_console,
+                   st.pair_state, (unsigned long)st.cuts,
+                   (unsigned long)st.vbus_cycles,
                    (unsigned long)st.pair_errors);
     if (st.pair_blocked_factory_pw || st.last_error[0] != '\0')
     {

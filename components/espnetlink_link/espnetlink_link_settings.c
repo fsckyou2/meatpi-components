@@ -47,11 +47,17 @@ static const settings_field_t FIELDS[] =
 {
     /* master switch: the link task only runs when true */
     SETTINGS_BOOL("enabled", true),
-    /* wifi_modem: USB = power only, dongle reached over its AP (GPS
-       undisturbed); usb_ncm / usb_rndis: dongle stays a USB-Ethernet
-       adapter presenting that class (the pairing pass sets the dongle's
-       usb_dev_ethernet.class to match) */
-    SETTINGS_STR_ENUM("mode", "wifi_modem,usb_ncm,usb_rndis", "wifi_modem"),
+    /* usb_rndis (the default since 2026-10-12, Ali: the dongle is set up
+       as a USB Ethernet modem by default; a fresh dongle ships rndis +
+       LTE sharing, so the first contact needs no dongle restart) /
+       usb_ncm: the dongle stays a USB-Ethernet adapter presenting that
+       class (the pairing pass sets the dongle's usb_dev_ethernet.class
+       to match); wifi_modem: the dongle's USB data is cut after every
+       pairing pass (nothing persists on the dongle: it boots with USB on
+       and the WiCAN re-pairs at every dongle boot), the dongle is reached
+       over its AP, its GPS is undisturbed. A stored value persists across
+       updates: only a fresh device takes the new default. */
+    SETTINGS_STR_ENUM("mode", "wifi_modem,usb_ncm,usb_rndis", "usb_rndis"),
     /* zero-touch: read the AP key over USB on every enumeration and
        (wifi_modem) cut the data lines; false = manual pair only */
     SETTINGS_BOOL("auto_pair", true),

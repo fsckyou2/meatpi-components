@@ -54,3 +54,11 @@ None (configured through `usb_eth_host_start()` by `usb_host_manager`).
 Live only (USB DMA + CherryUSB): the USB-Ethernet bench (`.\test.ps1
 usbeth`), the ESPNetLink bench, and `espnetlink_link`'s cut/recovery
 sequence exercise attach, IP up/lost, overlap suspend and DNS restore.
+
+Disconnect ordering (2026-10-12): each class rx thread leaves as soon as
+its port disconnects and the class disconnect waits for it before the
+netif glue stops and the hub releases the port (`cherryusb/PROVENANCE.md`,
+the 2026-10-12 entry: a VBUS cycle of the ESPNetLink while the wire
+carried traffic aborted in the thread's control transfer). The proof is
+`POST /api/espnetlink/repair` repeated while the wire carries traffic (the
+garage bench's g6 leg and the repair hammer).

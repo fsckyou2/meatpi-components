@@ -16,6 +16,30 @@
 
 static struct usbh_asix g_asix_class;
 
+/* WiCAN (2026-10-12): the same disconnect race as in usbh_rndis.c (the rx
+ * thread's control transfer against usbh_hubport_release() deleting the
+ * port's mutex): the thread leaves as soon as the port disconnects and the
+ * disconnect waits for it, longer than one control transfer timeout. */
+static volatile bool g_asix_rx_thread_alive;
+static volatile bool g_asix_disconnecting;
+
+static bool usbh_asix_rx_should_stop(void)
+{
+    struct usbh_hubport *hport = g_asix_class.hport;
+
+    return hport == NULL || !hport->connected || g_asix_disconnecting;
+}
+
+static void usbh_asix_wait_rx_thread(void)
+{
+    for (int i = 0; i < 300 && g_asix_rx_thread_alive; i++) {
+        usb_osal_msleep(10);
+    }
+    if (g_asix_rx_thread_alive) {
+        USB_LOG_WRN("asix rx thread still up 3 s after the disconnect\r\n");
+    }
+}
+
 #define g_asix_rx_buffer    g_usbh_eth_shared_rx_buffer
 #define g_asix_tx_buffer    g_usbh_eth_shared_tx_buffer
 #define g_asix_inttx_buffer g_usbh_eth_shared_int_buffer
@@ -625,6 +649,7 @@ static int usbh_asix_connect(struct usbh_hubport *hport, uint8_t intf)
     strncpy(hport->config.intf[intf].devname, DEV_FORMAT, CONFIG_USBHOST_DEV_NAMELEN);
 
     USB_LOG_INFO("Register ASIX Class:%s\r\n", hport->config.intf[intf].devname);
+    g_asix_disconnecting = false;
     usbh_asix_run(asix_class);
     return ret;
 }
@@ -636,6 +661,7 @@ static int usbh_asix_disconnect(struct usbh_hubport *hport, uint8_t intf)
     struct usbh_asix *asix_class = (struct usbh_asix *)hport->config.intf[intf].priv;
 
     if (asix_class) {
+        g_asix_disconnecting = true;
         if (asix_class->bulkin) {
             usbh_kill_urb(&asix_class->bulkin_urb);
         }
@@ -647,6 +673,8 @@ static int usbh_asix_disconnect(struct usbh_hubport *hport, uint8_t intf)
         if (asix_class->intin) {
             usbh_kill_urb(&asix_class->intin_urb);
         }
+
+        usbh_asix_wait_rx_thread();
 
         if (hport->config.intf[intf].devname[0] != '\0') {
             usb_osal_thread_schedule_other();
@@ -710,11 +738,12 @@ void usbh_asix_rx_thread(CONFIG_USB_OSAL_THREAD_SET_ARGV)
 
     (void)CONFIG_USB_OSAL_THREAD_GET_ARGV;
     USB_LOG_INFO("Create asix rx thread\r\n");
+    g_asix_rx_thread_alive = true;
     // clang-format off
 find_class:
     // clang-format on
     g_asix_class.connect_status = false;
-    if (usbh_find_class_instance("/dev/asix") == NULL || !g_asix_class.hport) {
+    if (usbh_find_class_instance("/dev/asix") == NULL || usbh_asix_rx_should_stop()) {
         goto delete;
     }
 
@@ -805,6 +834,7 @@ find_class:
     // clang-format off
 delete:
     USB_LOG_INFO("Delete asix rx thread\r\n");
+    g_asix_rx_thread_alive = false;
     usb_osal_thread_delete(NULL);
     // clang-format on
 }

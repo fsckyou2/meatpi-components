@@ -61,10 +61,18 @@ static const char *TAG = "espnetlink";
 #define USB_MAX_RESP          2048
 #define USB_VBUS_OFF_MS       1000   /* long enough for the dongle's caps */
 #define USB_REBOOT_DELAY_MS   2000   /* let the cut land + logs flush      */
+/* ticks with the dongle on the port and no Ethernet class bound before
+ * it is called a console-mode dongle (an NCM/RNDIS composite binds its
+ * driver within the first tick after enumeration) */
+#define USB_CONSOLE_TICKS     3
 
 static espnl_sm_t s_sm;
 static bool s_was_up;
 static bool s_attached;      /* NCM up to a 303A:4007 device            */
+static bool s_console_only;  /* 303A:4007 as a CDC console alone        */
+static int  s_console_ticks;
+static int  s_present_ticks; /* dongle on the ID pin, nothing enumerated */
+static bool s_kicked;        /* the one USB-mode VBUS kick spent         */
 static bool s_repair_req;
 static uint32_t s_cuts;
 static uint32_t s_cycles;
@@ -740,7 +748,85 @@ void espnl_usb_init(void)
                   cfg->cut_retries, now_ms());
     s_was_up = false;
     s_attached = false;
+    s_console_only = false;
+    s_console_ticks = 0;
+    s_present_ticks = 0;
+    s_kicked = false;
     s_repair_req = false;
+}
+
+/* A USB mode with the dongle on the port but never enumerated: an earlier
+ * wifi_modem pass cut its data lines (the cut lasts until the dongle's
+ * next boot) and this WiCAN is not on the dongle's AP to restore them
+ * (that path lives in the link task). The user who just switched modes
+ * would otherwise wait for the next car start: one VBUS cycle instead,
+ * once per presence (2026-10-12). */
+static bool usb_mode_kick(const usb_host_manager_status_t *st, bool up)
+{
+    const espnl_config_t *cfg = espnl_config();
+    bool usb_mode = cfg->mode != ESPNETLINK_MODE_WIFI_MODEM;
+
+    if (!st->device_present || up)
+    {
+        s_present_ticks = 0;
+        if (!st->device_present)
+        {
+            s_kicked = false; /* a re-plug earns a new kick */
+        }
+        return false;
+    }
+    if (s_present_ticks < ESPNL_USB_KICK_TICKS)
+    {
+        s_present_ticks++;
+    }
+    if (!espnl_core_usb_kick_due(usb_mode, st->host_active,
+                                 st->device_present, up, s_console_only,
+                                 s_sm.state == ESPNL_SM_IDLE,
+                                 s_present_ticks, s_kicked))
+    {
+        return false;
+    }
+    s_kicked = true;
+    ESP_LOGW(TAG, "usb mode: the dongle on the port never enumerated in %d s "
+             "(its data lines cut by an earlier pass?): one VBUS cycle",
+             ESPNL_USB_KICK_TICKS);
+    act_vbus_cycle();
+    return true;
+}
+
+/* A dongle in usb_mode=console (dongle api 9, 2026-10-12): the WiCAN
+ * enumerates 303A:4007 with a CDC-ACM interface and nothing else, so no
+ * USB-Ethernet link ever comes up and the machine has nothing to pair
+ * over. Report it so the UI can say why; its WiFi AP still works with a
+ * stored key. Debounced: a fresh RNDIS/NCM enumeration shows the device
+ * before its class driver is bound. */
+static void note_console_only(const usb_host_manager_status_t *st)
+{
+    bool now = espnl_core_is_console_only(st->dev_present, st->dev_vid,
+                                          st->dev_pid, st->driver[0] != '\0');
+
+    if (!now)
+    {
+        if (s_console_only)
+        {
+            ESP_LOGI(TAG, "console-mode ESPNetLink gone from the USB port");
+        }
+        s_console_only = false;
+        s_console_ticks = 0;
+        return;
+    }
+    if (s_console_ticks < USB_CONSOLE_TICKS)
+    {
+        s_console_ticks++;
+    }
+    if (s_console_ticks == USB_CONSOLE_TICKS && !s_console_only)
+    {
+        s_console_only = true;
+        ESP_LOGI(TAG, "ESPNetLink on the USB port in console mode: no USB "
+                 "Ethernet, nothing to pair over USB (its WiFi AP is the "
+                 "uplink with a stored key; set the dongle's usb_mode to "
+                 "auto for zero-touch pairing)");
+    }
 }
 
 void espnl_usb_tick(bool ap_stale)
@@ -757,6 +843,11 @@ void espnl_usb_tick(bool ap_stale)
     bool is_espnl = up && espnl_core_is_espnetlink(st.vid, st.pid);
 
     s_attached = is_espnl;
+    note_console_only(&st);
+    if (cfg->auto_pair && usb_mode_kick(&st, up))
+    {
+        return; /* the dongle is rebooting: the attach edge follows */
+    }
 
     if (up != s_was_up)
     {
@@ -813,6 +904,7 @@ void espnl_usb_tick(bool ap_stale)
 void espnl_usb_status(espnl_usb_status_t *out)
 {
     out->attached = s_attached;
+    out->dongle_console = s_console_only;
     out->state = espnl_sm_state_str(s_sm.state);
     out->ncm_steady = s_sm.state == ESPNL_SM_NCM_UP ||
                       (s_attached && !espnl_config()->auto_pair);

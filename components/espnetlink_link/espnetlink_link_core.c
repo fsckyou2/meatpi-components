@@ -83,6 +83,27 @@ const char *espnl_core_mode_usb_class(espnl_core_mode_t mode)
     }
 }
 
+bool espnl_core_is_console_only(bool dev_present, uint16_t dev_vid,
+                                uint16_t dev_pid, bool eth_driver_bound)
+{
+    /* the dongle's own identity on the port but no USB Ethernet class
+     * bound: its usb_mode is console (2026-10-12), the CDC console alone.
+     * An NCM or RNDIS composite has its driver bound within the first
+     * tick after enumeration; the engine still debounces the verdict. */
+    return dev_present && espnl_core_is_espnetlink(dev_vid, dev_pid) &&
+           !eth_driver_bound;
+}
+
+bool espnl_core_usb_kick_due(bool usb_mode, bool host_active,
+                             bool device_present, bool enumerated,
+                             bool console_only, bool machine_idle,
+                             int ticks_present, bool kicked)
+{
+    return usb_mode && host_active && device_present && !enumerated &&
+           !console_only && machine_idle && !kicked &&
+           ticks_present >= ESPNL_USB_KICK_TICKS;
+}
+
 bool espnl_core_ssid_match(const char *configured, const char *connected)
 {
     if (configured == NULL || connected == NULL || configured[0] == '\0')
@@ -230,6 +251,11 @@ bool espnl_core_parse_health(const char *json, espnl_health_t *out)
 
     out->napt = val_true(obj, top_end, "\"napt\":");
     out->usb_data = val_true(obj, top_end, "\"usb_data\":");
+    /* dongle api 9 (2026-10-12): false = the dongle presents its CDC
+     * console alone on USB (usb_mode console); an older dongle has no such
+     * key and always carries the Ethernet function */
+    out->usb_ethernet = find_key(obj, top_end, "\"usb_ethernet\":") == NULL ||
+                        val_true(obj, top_end, "\"usb_ethernet\":");
 
     if (section(obj, "\"lte\":", &s, &e))
     {

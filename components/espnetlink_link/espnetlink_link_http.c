@@ -110,6 +110,9 @@ static esp_err_t status_handler(httpd_req_t *req)
     if (u != NULL)
     {
         cJSON_AddBoolToObject(u, "attached", st.usb_attached);
+        /* 2026-10-12: a dongle in usb_mode=console on the port (CDC
+         * console alone, no USB Ethernet, nothing to pair over USB) */
+        cJSON_AddBoolToObject(u, "dongle_console", st.dongle_console);
         cJSON_AddStringToObject(u, "pair_state", st.pair_state);
         cJSON_AddNumberToObject(u, "cuts", st.cuts);
         cJSON_AddNumberToObject(u, "vbus_cycles", st.vbus_cycles);

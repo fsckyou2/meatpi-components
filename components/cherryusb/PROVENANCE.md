@@ -143,3 +143,25 @@ usbh_*_run/stop/eth_input symbols would bypass our netif glue.
   The product string is "" on this port (`CONFIG_USBHOST_GET_STRING_DESC`
   stays off: in this core a failed string read fails the enumeration).
 
+
+- `class/wireless/usbh_rndis.c`, `class/cdc/usbh_cdc_ncm.c`,
+  `class/cdc/usbh_cdc_ecm.c`, `class/vendor/net/usbh_asix.c` (2026-10-12,
+  WICAN FIX, diverges from upstream): the class rx thread runs above the
+  hub thread's priority (`CONFIG_USBHOST_PSC_PRIO + 1`). When the
+  disconnect kills its bulk-in urb it loops back to `find_class` and polls
+  the connect status with a control transfer on the port, while
+  `usbh_hubport_release()` deletes that port's mutex right after the class
+  disconnect returns; the thread's `usb_osal_mutex_give()` then ran on a
+  deleted mutex (`assert failed: spinlock_acquire ... lock->count == 0`,
+  task `usbh_rndis_rx`, the ESPNetLink VBUS-cycled by
+  `POST /api/espnetlink/repair` while the wire carried the VPN and HTTP
+  POSTs: the garage bench's g6 leg, the crash note decoded by
+  `tools/crash_decode.py`). Fix in each driver: a `disconnecting` flag
+  raised at the start of the disconnect, the thread leaves at `find_class`
+  when the port is no longer connected or the flag is up
+  (`usbh_<class>_rx_should_stop()`), and the disconnect waits for the
+  thread to exit (`usbh_<class>_wait_rx_thread()`, 10 ms polls, 3 s bound,
+  longer than `CONFIG_USBHOST_CONTROL_TRANSFER_TIMEOUT` = 500 ms) before
+  the class stop, the memset and the hub's mutex delete. rtl8152 shares the
+  template but is compiled out. Candidate for upstreaming. Proof: the
+  repair hammer of the garage bench (TESTING.md).

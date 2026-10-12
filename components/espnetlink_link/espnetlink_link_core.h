@@ -38,7 +38,10 @@ extern "C" {
 /* ---- dongle identity --------------------------------------------------- */
 
 #define ESPNL_USB_VID       0x303A   /* Espressif */
-#define ESPNL_USB_PID       0x4007   /* ESPNetLink composite (NCM + ACM) */
+#define ESPNL_USB_PID       0x4007   /* ESPNetLink composite: RNDIS or NCM
+                                        + the ACM console, or (dongle
+                                        usb_mode=console) the ACM console
+                                        alone */
 #define ESPNL_USB_JTAG_PID  0x1001   /* S3 ROM serial-JTAG: boot window */
 #define ESPNL_USB_HOST_ADDR "192.168.7.1"   /* the dongle on the NCM link */
 #define ESPNL_USB_OWN_ADDR  "192.168.7.2"   /* what its DHCP hands us     */
@@ -52,6 +55,30 @@ extern "C" {
 /** True for the ESPNetLink's own composite device only. */
 bool espnl_core_is_espnetlink(uint16_t vid, uint16_t pid);
 
+/** True when the device on the port is the ESPNetLink with NO USB
+ *  Ethernet class driver bound: its usb_mode is `console` (dongle api 9,
+ *  2026-10-12), the CDC console alone, nothing to pair over USB. The
+ *  engine debounces it (a fresh RNDIS/NCM enumeration shows the device
+ *  before its driver is bound). */
+bool espnl_core_is_console_only(bool dev_present, uint16_t dev_vid,
+                                uint16_t dev_pid, bool eth_driver_bound);
+
+/* A USB mode (usb_rndis / usb_ncm) with the dongle on the port (ID pin)
+ * but never enumerated: its data lines were cut by an earlier wifi_modem
+ * pass (a runtime cut lasts until the dongle's next boot) and the WiCAN
+ * is not on its AP to restore them. One VBUS cycle brings it back with
+ * USB on (2026-10-12). Ticks are seconds; the kick is due once. */
+#define ESPNL_USB_KICK_TICKS 30
+
+/** True when that kick is due: a USB mode, the host up with a device on
+ *  the ID pin, nothing enumerated (no Ethernet link, no console-only
+ *  dongle either), the machine idle, for ESPNL_USB_KICK_TICKS ticks, and
+ *  not kicked yet for this presence. */
+bool espnl_core_usb_kick_due(bool usb_mode, bool host_active,
+                             bool device_present, bool enumerated,
+                             bool console_only, bool machine_idle,
+                             int ticks_present, bool kicked);
+
 /* ---- link mode --------------------------------------------------------- */
 
 /* Mirrors the public espnetlink_mode_t (espnetlink_link.h) value-for-value:
@@ -64,7 +91,9 @@ typedef enum
 } espnl_core_mode_t;
 
 /** Settings-token decode ("wifi_modem"/"usb_ncm"/"usb_rndis"); anything
- *  else (including NULL) is the wifi_modem default. */
+ *  else (including NULL) falls back to wifi_modem. (The schema default is
+ *  usb_rndis since 2026-10-12; this fallback only matters for a token the
+ *  schema never produced.) */
 espnl_core_mode_t espnl_core_mode_from_str(const char *s);
 
 /** The settings token for a mode (never NULL). */
@@ -81,6 +110,9 @@ typedef struct
     bool valid;          /**< document parsed                           */
     bool napt;
     bool usb_data;       /**< data lines routed to the host             */
+    bool usb_ethernet;   /**< the USB Ethernet function is present (dongle
+                              api 9: false in usb_mode=console; an older
+                              dongle has no key and reads true)         */
     bool lte_valid;
     bool lte_attached;
     bool lte_connected;

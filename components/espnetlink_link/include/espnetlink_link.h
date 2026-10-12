@@ -23,19 +23,22 @@
 /**
  * @file espnetlink_link.h
  * @brief The ESPNetLink LTE/GPS dongle as the WiCAN's internet uplink:
- *        zero-touch pairing over USB, then either the "WiFi modem"
- *        topology (default) or plain USB-Ethernet (NCM).
+ *        zero-touch pairing over USB, then either plain USB-Ethernet
+ *        (`usb_rndis`, the default since 2026-10-12, or `usb_ncm`) or the
+ *        "WiFi modem" topology.
  *
- * Why two modes: the WiCAN's USB host transmitter desenses the dongle's
- * GNSS while the USB-Ethernet link is active (a cold fix never
- * completes). In `wifi_modem` mode the USB cable carries 5 V only:
- * the WiCAN reads the dongle's per-device AP key over USB once, tells
- * the dongle to cut its data lines, and from then on joins the dongle's
- * WiFi AP (a normal wifi_manager fallback network: the home network
- * stays primary) for internet (NAPT into LTE) and GPS (`GET /api/gps`).
- * In `usb_ncm` mode the data lines stay on and the dongle is used as a
- * USB-Ethernet adapter (usb_host_manager's uplink); GPS rides the same
- * HTTP route over the USB link instead of the ACM console.
+ * Why two topologies: the WiCAN's USB host transmitter desenses the
+ * dongle's GNSS while the USB-Ethernet link is active (a cold fix takes
+ * longer). In `usb_rndis` / `usb_ncm` the data lines stay on and the
+ * dongle is a USB-Ethernet adapter (usb_host_manager's uplink); GPS and
+ * health ride HTTP over the USB link. In `wifi_modem` the WiCAN reads the
+ * dongle's per-device AP key over USB, tells the dongle to cut its data
+ * lines, and joins the dongle's WiFi AP (a normal wifi_manager fallback
+ * network: the home network stays primary) for internet (NAPT into LTE)
+ * and GPS (`GET /api/gps`). Since 2026-10-12 nothing about the cut
+ * persists on the dongle (it boots with USB on every time, so a forgotten
+ * AP password never locks its owner out): the WiCAN repeats identify, key
+ * read and cut at every dongle boot, about 10 to 20 s of USB per boot.
  *
  * Zero-touch sequence (`auto_pair`, wifi_modem): USB attach 303A:4007 →
  * GET /api/info → GET /api/wifi_modem/credentials (served over USB only)
@@ -44,18 +47,23 @@
  * (expected). A new/changed key means the WiCAN reboots once
  * (reboot-to-apply); an unchanged key needs nothing. Recovery (the AP
  * refuses the stored key, the cut never lands) is a VBUS cycle through
- * usb_host_manager_set_vbus(), rate-limited.
+ * usb_host_manager_set_vbus(), rate-limited. In the USB modes the
+ * machine ensures the dongle's class and LTE sharing instead (a fresh
+ * dongle ships rndis + sharing: nothing to change, no dongle restart).
+ * A dongle in usb_mode=console presents only its CDC console on USB: it
+ * is reported (`dongle_console`), never paired over USB.
  *
  * Ownership split:
  *  - wifi_manager owns JOINING (the dongle's SSID is a STA candidate).
- *  - usb_host_manager/usb_eth_host own the USB host + NCM netif.
+ *  - usb_host_manager/usb_eth_host own the USB host + the USB netif.
  *  - this component owns the pairing machine, knows WHICH SSID/device
  *    is the dongle, polls GPS + health over HTTP and publishes fixes
  *    through one sink (main wires it to autopid, like usb_acm_cli's).
  *
- * Settings ("espnetlink", v2): enabled (true), mode (wifi_modem|usb_ncm,
- * wifi_modem), auto_pair (true), ssid, device_id, host, gps_poll_s (2),
- * health_poll_s (10), cut_retries (2), cli. Boot-applied.
+ * Settings ("espnetlink", v2): enabled (true), mode (wifi_modem|usb_ncm|
+ * usb_rndis, default usb_rndis since 2026-10-12), auto_pair (true), ssid,
+ * device_id, host, gps_poll_s (2), health_poll_s (10), cut_retries (2),
+ * apn, apn_user, apn_password, cli. Boot-applied.
  */
 #pragma once
 
@@ -98,6 +106,9 @@ typedef struct
     char     host[16];         /**< dongle address in use ("" = none)    */
     /* USB side */
     bool     usb_attached;     /**< NCM link up to a 303A:4007 device    */
+    bool     dongle_console;   /**< 303A:4007 on the port as a CDC console
+                                    alone (dongle usb_mode=console): no
+                                    USB Ethernet, nothing to pair over USB */
     const char *pair_state;    /**< state machine, as text               */
     uint32_t cuts;             /**< successful usb_data cuts             */
     uint32_t vbus_cycles;      /**< recovery power cycles                */

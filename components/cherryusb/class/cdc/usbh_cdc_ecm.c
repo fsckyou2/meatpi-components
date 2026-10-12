@@ -31,6 +31,30 @@
 
 static struct usbh_cdc_ecm g_cdc_ecm_class;
 
+/* WiCAN (2026-10-12): the same disconnect race as in usbh_rndis.c (the rx
+ * thread's control transfer against usbh_hubport_release() deleting the
+ * port's mutex): the thread leaves as soon as the port disconnects and the
+ * disconnect waits for it, longer than one control transfer timeout. */
+static volatile bool g_cdc_ecm_rx_thread_alive;
+static volatile bool g_cdc_ecm_disconnecting;
+
+static bool usbh_cdc_ecm_rx_should_stop(void)
+{
+    struct usbh_hubport *hport = g_cdc_ecm_class.hport;
+
+    return hport == NULL || !hport->connected || g_cdc_ecm_disconnecting;
+}
+
+static void usbh_cdc_ecm_wait_rx_thread(void)
+{
+    for (int i = 0; i < 300 && g_cdc_ecm_rx_thread_alive; i++) {
+        usb_osal_msleep(10);
+    }
+    if (g_cdc_ecm_rx_thread_alive) {
+        USB_LOG_WRN("cdc ecm rx thread still up 3 s after the disconnect\r\n");
+    }
+}
+
 static bool usbh_cdc_ecm_is_ready(const struct usbh_cdc_ecm *cdc_ecm_class)
 {
     return cdc_ecm_class && cdc_ecm_class->hport && cdc_ecm_class->intin &&
@@ -213,6 +237,7 @@ get_mac:
 
     USB_LOG_INFO("Register CDC ECM Class:%s\r\n", hport->config.intf[intf].devname);
 
+    g_cdc_ecm_disconnecting = false;
     usbh_cdc_ecm_run(cdc_ecm_class);
     return ret;
 }
@@ -224,6 +249,7 @@ static int usbh_cdc_ecm_disconnect(struct usbh_hubport *hport, uint8_t intf)
     struct usbh_cdc_ecm *cdc_ecm_class = (struct usbh_cdc_ecm *)hport->config.intf[intf].priv;
 
     if (cdc_ecm_class) {
+        g_cdc_ecm_disconnecting = true;
         if (cdc_ecm_class->bulkin) {
             usbh_kill_urb(&cdc_ecm_class->bulkin_urb);
         }
@@ -235,6 +261,8 @@ static int usbh_cdc_ecm_disconnect(struct usbh_hubport *hport, uint8_t intf)
         if (cdc_ecm_class->intin) {
             usbh_kill_urb(&cdc_ecm_class->intin_urb);
         }
+
+        usbh_cdc_ecm_wait_rx_thread();
 
         if (hport->config.intf[intf].devname[0] != '\0') {
             usb_osal_thread_schedule_other();
@@ -260,11 +288,12 @@ void usbh_cdc_ecm_rx_thread(CONFIG_USB_OSAL_THREAD_SET_ARGV)
 
     (void)CONFIG_USB_OSAL_THREAD_GET_ARGV;
     USB_LOG_INFO("Create cdc ecm rx thread\r\n");
+    g_cdc_ecm_rx_thread_alive = true;
     // clang-format off
 find_class:
     // clang-format on
     g_cdc_ecm_class.connect_status = false;
-    if (usbh_find_class_instance("/dev/cdc_ether") == NULL || !g_cdc_ecm_class.hport) {
+    if (usbh_find_class_instance("/dev/cdc_ether") == NULL || usbh_cdc_ecm_rx_should_stop()) {
         goto delete;
     }
 
@@ -311,6 +340,7 @@ find_class:
     // clang-format off
 delete:
     USB_LOG_INFO("Delete cdc ecm rx thread\r\n");
+    g_cdc_ecm_rx_thread_alive = false;
     usb_osal_thread_delete(NULL);
     // clang-format on
 }
