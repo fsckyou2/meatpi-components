@@ -87,8 +87,8 @@ static uint32_t s_gps_stamp_ms;
 static espnl_health_t s_health;
 static uint32_t s_health_stamp_ms;   /* when s_health was read (valid)     */
 static bool s_carrier_synced = true; /* nothing to relay until a pass says */
-static char s_carrier_note[96];
-static espnetlink_link_status_t s_st;
+static char s_carrier_note[96] EXT_RAM_BSS_ATTR;
+static espnetlink_link_status_t s_st EXT_RAM_BSS_ATTR;
 static int s_consec_fail;          /* polls failed in a row (task-only) */
 static volatile uint32_t s_poll_hold_until_ms;
 static volatile bool s_kick_sta;   /* the USB side saw the dongle reboot */
