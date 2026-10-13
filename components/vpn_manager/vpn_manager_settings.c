@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "settings_manager.h"
 
 #include "vpn_manager.h" /* vpn_manager_register_cli (settings-gated) */
@@ -59,7 +60,7 @@ static const settings_field_t FIELDS[] =
     SETTINGS_BOOL("cli", true),
 };
 
-static vpn_config_t s_cfg;
+static vpn_config_t s_cfg EXT_RAM_BSS_ATTR;
 static bool s_configured;
 static char s_endpoint[64]; /* display endpoint (status/log strings) */
 

@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -55,7 +56,7 @@ static const char *TAG = "wifi_manager";
    same reason) */
 #define TRY_START_MS 300u
 
-static wm_trial_t         s_trial;          /* small: internal is fine */
+static wm_trial_t         s_trial EXT_RAM_BSS_ATTR; /* PSRAM by default (§2) */
 static SemaphoreHandle_t  s_try_lock;
 static StaticSemaphore_t  s_try_lock_buf;
 static esp_timer_handle_t s_try_timer;

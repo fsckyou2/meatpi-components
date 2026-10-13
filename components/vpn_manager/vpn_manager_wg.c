@@ -43,6 +43,7 @@
  */
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wireguard.h"
@@ -55,7 +56,8 @@
 static const char *TAG = "vpn_manager";
 
 static wireguard_ctx_t s_ctx;
-static wireguard_config_t s_cfg;
+/* PSRAM; esp_wireguard keeps a pointer to it: static for life */
+static wireguard_config_t s_cfg EXT_RAM_BSS_ATTR;
 /* esp_wireguard keeps POINTERS into its config: these back them */
 static char s_addr[32];
 static char s_endpoint[64];
