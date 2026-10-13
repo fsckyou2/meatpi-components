@@ -104,6 +104,43 @@ bool espnl_core_usb_kick_due(bool usb_mode, bool host_active,
            ticks_present >= ESPNL_USB_KICK_TICKS;
 }
 
+/* ---- the GPS hint ------------------------------------------------------- */
+
+uint32_t espnl_core_nofix_update(espnl_nofix_t *acc, bool away, bool lte_up,
+                                 bool fix, uint32_t now_ms)
+{
+    if (acc == NULL)
+    {
+        return 0;
+    }
+
+    bool cond = away && lte_up && !fix;
+
+    if (!cond)
+    {
+        acc->running = false;
+        return 0;
+    }
+    if (!acc->running)
+    {
+        acc->running = true;
+        acc->since_ms = now_ms;
+        return 0;
+    }
+    return (now_ms - acc->since_ms) / 1000u;
+}
+
+/* ---- the SIM PIN relay -------------------------------------------------- */
+
+bool espnl_core_pin_relay_due(const char *pin, const char *sim, bool sent)
+{
+    if (pin == NULL || pin[0] == '\0' || sim == NULL || sent)
+    {
+        return false;
+    }
+    return strcmp(sim, "pin") == 0;
+}
+
 bool espnl_core_ssid_match(const char *configured, const char *connected)
 {
     if (configured == NULL || connected == NULL || configured[0] == '\0')

@@ -80,6 +80,10 @@ static const settings_field_t FIELDS[] =
     SETTINGS_STR ("apn", 63, ""),
     SETTINGS_STR ("apn_user", 32, ""),
     SETTINGS_STR ("apn_password", 32, ""),
+    /* the SIM's PIN (4 to 8 digits), relayed to the dongle's `apn_pin` once
+       per boot while the dongle reports its SIM locked; a rejected PIN is
+       never retried by itself (2026-10-13; additive, no version bump) */
+    SETTINGS_STR ("sim_pin", 8, ""),
     SETTINGS_BOOL("cli", true),
 };
 
@@ -143,6 +147,7 @@ static esp_err_t on_apply(const cJSON *settings)
     get_str(settings, "apn_user", s_cfg.apn_user, sizeof(s_cfg.apn_user));
     get_str(settings, "apn_password", s_cfg.apn_password,
             sizeof(s_cfg.apn_password));
+    get_str(settings, "sim_pin", s_cfg.sim_pin, sizeof(s_cfg.sim_pin));
     s_cfg.cli           = get_bool(settings, "cli", true);
     s_configured = true;
 

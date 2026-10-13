@@ -79,6 +79,38 @@ bool espnl_core_usb_kick_due(bool usb_mode, bool host_active,
                              bool console_only, bool machine_idle,
                              int ticks_present, bool kicked);
 
+/* ---- the GPS hint (2026-10-13) ------------------------------------------ */
+
+/* A USB mode keeps the data lines live, which desenses the dongle's GPS
+ * (bench 2026-08-26: cold fixes 86 to 110 s on the wire against 50 to 66 s
+ * with the lines cut, and worse availability). A WiCAN away from home on
+ * the wire, LTE up, with no fix for this long is what the UI nudges toward
+ * WiFi modem. The firmware counts; the status carries the verdict. */
+#define ESPNL_NOFIX_HINT_S 600
+
+typedef struct
+{
+    bool     running;   /**< the condition holds since `since_ms`       */
+    uint32_t since_ms;
+} espnl_nofix_t;
+
+/** Feed every tick: @p away = the dongle is the uplink over USB and the
+ *  station is not on a home network, @p lte_up = the dongle's PPP is up,
+ *  @p fix = a fix is known (the cached one or the dongle's own). Returns
+ *  the seconds the condition (away && lte_up && !fix) has held, 0 while
+ *  it does not; the millisecond clock may wrap. */
+uint32_t espnl_core_nofix_update(espnl_nofix_t *acc, bool away, bool lte_up,
+                                 bool fix, uint32_t now_ms);
+
+/* ---- the SIM PIN relay (2026-10-13) ------------------------------------- */
+
+/** True when the WiCAN's SIM PIN should go to the dongle now: it has one
+ *  (@p pin non-empty), the dongle's SIM reports "pin" (locked: no PIN on
+ *  the dongle, or one it has not tried), and this boot has not sent it
+ *  yet. A rejected PIN ("pin_wrong") is never retried by itself: three
+ *  wrong tries lock the SIM. NULLs read as empty. */
+bool espnl_core_pin_relay_due(const char *pin, const char *sim, bool sent);
+
 /* ---- link mode --------------------------------------------------------- */
 
 /* Mirrors the public espnetlink_mode_t (espnetlink_link.h) value-for-value:
@@ -121,10 +153,11 @@ typedef struct
     char network_type[12];
     /* 2026-10-07 (dongle api 8, absent before: ""): the SIM as the
        dongle's bring-up found it ("ready" | "missing" | "pin" |
-       "unknown"), the bring-up stage ("not_started" | "connecting" |
-       "connected" | "ppp_disconnected" | "network_detached") and the
-       carrier address while connected */
-    char sim[8];
+       "unknown"; "pin_wrong" since 2026-10-13: the SIM refused the PIN
+       the dongle holds), the bring-up stage ("not_started" |
+       "connecting" | "connected" | "ppp_disconnected" |
+       "network_detached") and the carrier address while connected */
+    char sim[12];
     char stage[20];
     char ip[16];
     bool gps_valid;

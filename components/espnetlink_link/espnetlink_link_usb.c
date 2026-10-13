@@ -78,6 +78,8 @@ static uint32_t s_cuts;
 static uint32_t s_cycles;
 static uint32_t s_errors;
 static bool s_reboot_spawned;
+static char s_last_sim[12]; /* the dongle's SIM state as last read over the cable */
+static bool s_pin_sent;     /* the SIM PIN went to the dongle this boot (2026-10-13) */
 
 static uint32_t now_ms(void)
 {
@@ -187,6 +189,8 @@ static void usb_read_health(void)
     if (ok)
     {
         espnl_engine_note_health(&h);
+        strncpy(s_last_sim, h.sim, sizeof(s_last_sim) - 1);
+        s_last_sim[sizeof(s_last_sim) - 1] = '\0';
     }
 }
 
@@ -217,13 +221,20 @@ static bool dongle_submit(void)
  * whenever the others change) and one submit. The dongle restarts once to
  * apply, the link drops within a second and the machine starts over from
  * the re-enumeration with nothing left to write. Runs in both modes, before
- * any cut. Returns true when a submit was sent. */
+ * any cut. Returns true when a submit was sent.
+ * The SIM PIN (2026-10-13) rides the same PUT as the dongle's `apn_pin`,
+ * once per boot and only while the dongle's SIM reports "pin"; the dongle
+ * reports "pin_wrong" when the SIM refuses it and neither side retries
+ * (three wrong tries lock the SIM). */
 static bool ensure_dongle_carrier(void)
 {
     const espnl_config_t *cfg = espnl_config();
     http_client_response_t resp;
+    bool want_apn = cfg->apn[0] != '\0' || cfg->apn_user[0] != '\0';
+    bool pin_due = espnl_core_pin_relay_due(cfg->sim_pin, s_last_sim,
+                                            s_pin_sent);
 
-    if (cfg->apn[0] == '\0' && cfg->apn_user[0] == '\0')
+    if (!want_apn && !pin_due)
     {
         espnl_engine_note_carrier(true, "");
         return false;
@@ -255,30 +266,40 @@ static bool ensure_dongle_carrier(void)
 
     const cJSON *a = cJSON_GetObjectItemCaseSensitive(obj, "apn");
     const cJSON *u = cJSON_GetObjectItemCaseSensitive(obj, "apn_user");
-    bool same = cJSON_IsString(a) && strcmp(a->valuestring, cfg->apn) == 0 &&
-                cJSON_IsString(u) &&
-                strcmp(u->valuestring, cfg->apn_user) == 0;
+    /* no APN of our own = the dongle's is right by definition */
+    bool same = !want_apn ||
+                (cJSON_IsString(a) && strcmp(a->valuestring, cfg->apn) == 0 &&
+                 cJSON_IsString(u) &&
+                 strcmp(u->valuestring, cfg->apn_user) == 0);
     /* staged by an interrupted earlier pass, never applied (the same trap
      * ensure_dongle_setting met on 2026-08-25): submit anyway */
     bool pending = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(
         obj, "pending_reboot"));
 
-    if (same && !pending)
+    if (same && !pending && !pin_due)
     {
         cJSON_Delete(obj);
         espnl_engine_note_carrier(true, "");
         return false;
     }
 
-    if (!same)
+    if (!same || pin_due)
     {
-        /* §6 full-object replace; a "" password keeps the dongle's */
-        cJSON_DeleteItemFromObjectCaseSensitive(obj, "apn");
-        cJSON_AddStringToObject(obj, "apn", cfg->apn);
-        cJSON_DeleteItemFromObjectCaseSensitive(obj, "apn_user");
-        cJSON_AddStringToObject(obj, "apn_user", cfg->apn_user);
-        cJSON_DeleteItemFromObjectCaseSensitive(obj, "apn_password");
-        cJSON_AddStringToObject(obj, "apn_password", cfg->apn_password);
+        /* §6 full-object replace; a "" password (or PIN) keeps the dongle's */
+        if (!same)
+        {
+            cJSON_DeleteItemFromObjectCaseSensitive(obj, "apn");
+            cJSON_AddStringToObject(obj, "apn", cfg->apn);
+            cJSON_DeleteItemFromObjectCaseSensitive(obj, "apn_user");
+            cJSON_AddStringToObject(obj, "apn_user", cfg->apn_user);
+            cJSON_DeleteItemFromObjectCaseSensitive(obj, "apn_password");
+            cJSON_AddStringToObject(obj, "apn_password", cfg->apn_password);
+        }
+        if (pin_due)
+        {
+            cJSON_DeleteItemFromObjectCaseSensitive(obj, "apn_pin");
+            cJSON_AddStringToObject(obj, "apn_pin", cfg->sim_pin);
+        }
 
         char *body = cJSON_PrintUnformatted(obj);
 
@@ -317,9 +338,14 @@ static bool ensure_dongle_carrier(void)
         return false;
     }
 
-    ESP_LOGI(TAG, "carrier settings sent to the dongle (APN '%s'%s%s): it "
+    if (pin_due)
+    {
+        s_pin_sent = true;   /* once per boot, whatever the SIM says of it */
+    }
+    ESP_LOGI(TAG, "carrier settings sent to the dongle (APN '%s'%s%s%s): it "
              "restarts once to apply them", cfg->apn,
-             cfg->apn_user[0] ? ", user " : "", cfg->apn_user);
+             cfg->apn_user[0] ? ", user " : "", cfg->apn_user,
+             pin_due ? ", the SIM PIN" : "");
     espnl_engine_note_carrier(true, "");
     espnl_engine_dongle_rebooting();
     return true;

@@ -63,7 +63,7 @@
  * Settings ("espnetlink", v2): enabled (true), mode (wifi_modem|usb_ncm|
  * usb_rndis, default usb_rndis since 2026-10-12), auto_pair (true), ssid,
  * device_id, host, gps_poll_s (2), health_poll_s (10), cut_retries (2),
- * apn, apn_user, apn_password, cli. Boot-applied.
+ * apn, apn_user, apn_password, sim_pin (2026-10-13), cli. Boot-applied.
  */
 #pragma once
 
@@ -136,10 +136,17 @@ typedef struct
        dongle found it, the bring-up stage, the carrier address, and how
        old this reading is (the pairing pass reads it over the cable, so
        a WiCAN on its home WiFi keeps the last one instead of nothing) */
-    char     dongle_sim[8];    /**< "ready" | "missing" | "pin" | "unknown" | "" */
+    char     dongle_sim[12];   /**< "ready" | "missing" | "pin" | "pin_wrong"
+                                    | "unknown" | "" (pin_wrong: the SIM
+                                    refused the PIN the dongle holds)      */
     char     dongle_stage[20];
     char     dongle_ip[16];
     uint32_t health_age_ms;    /**< since the reading; 0 when none       */
+    /* the GPS hint (2026-10-13): seconds away from home on the wire with
+       LTE up and no fix anywhere (0 otherwise), and the verdict past
+       ESPNL_NOFIX_HINT_S (the UI nudges toward WiFi modem) */
+    uint32_t no_fix_s;
+    bool     no_fix_hint;
     /* the carrier settings relayed to the dongle (espnetlink.apn, ...) */
     char     apn[64];          /**< "" = the dongle keeps its own         */
     bool     carrier_synced;   /**< the last pass found the dongle holding

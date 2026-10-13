@@ -92,6 +92,8 @@ static espnetlink_link_status_t s_st;
 static int s_consec_fail;          /* polls failed in a row (task-only) */
 static volatile uint32_t s_poll_hold_until_ms;
 static volatile bool s_kick_sta;   /* the USB side saw the dongle reboot */
+static espnl_nofix_t s_nofix;      /* the GPS hint accumulator (task-only) */
+static uint32_t s_nofix_s;         /* its reading, under s_lock             */
 
 static uint32_t now_ms(void)
 {
@@ -164,6 +166,8 @@ esp_err_t espnetlink_link_status(espnetlink_link_status_t *out)
              s_health.stage);
     snprintf(out->dongle_ip, sizeof(out->dongle_ip), "%s", s_health.ip);
     out->health_age_ms = s_health.valid ? now_ms() - s_health_stamp_ms : 0;
+    out->no_fix_s = s_nofix_s;
+    out->no_fix_hint = s_nofix_s >= ESPNL_NOFIX_HINT_S;
     snprintf(out->apn, sizeof(out->apn), "%s", espnl_config()->apn);
     out->carrier_synced = s_carrier_synced;
     snprintf(out->carrier_note, sizeof(out->carrier_note), "%s",
@@ -610,6 +614,18 @@ static void link_task(void *arg)
         s_st.uplink = uplink;
         strncpy(s_st.host, host, sizeof(s_st.host) - 1);
         s_st.host[sizeof(s_st.host) - 1] = '\0';
+        /* the GPS hint (2026-10-13): away from home on the wire with LTE
+         * up and no fix anywhere, for how long (a station parked on the
+         * dongle's own AP slot is not at home) */
+        {
+            bool away = uplink == ESPNETLINK_UPLINK_ESPNETLINK_USB &&
+                        !(sta && !on_ap);
+            bool lte_up = s_health.valid && s_health.lte_connected;
+            bool fix = s_gps.valid || (s_health.valid && s_health.gps_fix);
+
+            s_nofix_s = espnl_core_nofix_update(&s_nofix, away, lte_up, fix,
+                                                t);
+        }
         xSemaphoreGive(s_lock);
 
         /* 3. a dead association: the dongle rebooted (we cycled it, or
@@ -716,6 +732,8 @@ esp_err_t espnetlink_link_start(void)
     s_st.dongle_fw[0] = '\0';
     s_st.dongle_api = 0;
     s_st.health_unsupported = false;
+    s_nofix.running = false;
+    s_nofix_s = 0;
     strncpy(s_st.ssid, cfg->ssid, sizeof(s_st.ssid) - 1);
     strncpy(s_st.device_id, cfg->device_id, sizeof(s_st.device_id) - 1);
     xSemaphoreGive(s_lock);

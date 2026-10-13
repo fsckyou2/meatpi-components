@@ -161,6 +161,15 @@ static esp_err_t status_handler(httpd_req_t *req)
         }
     }
 
+    /* the GPS hint (2026-10-13) */
+    cJSON *hint = cJSON_AddObjectToObject(o, "gps_hint");
+
+    if (hint != NULL)
+    {
+        cJSON_AddNumberToObject(hint, "no_fix_s", st.no_fix_s);
+        cJSON_AddBoolToObject(hint, "no_fix", st.no_fix_hint);
+    }
+
     cJSON_AddNumberToObject(o, "polls", st.polls);
     cJSON_AddNumberToObject(o, "failures", st.failures);
     cJSON_AddNumberToObject(o, "link_ups", st.link_ups);

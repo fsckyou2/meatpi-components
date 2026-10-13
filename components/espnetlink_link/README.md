@@ -242,6 +242,7 @@ gained the GPS fallback provider; `wifi_manager_sta_reconnect()`.
 | `apn` | str ≤63 `""` | carrier settings relayed to the dongle's `lte_upstream_pppos` by the pairing pass (2026-10-07, Quick Setup's USB step); "" = the dongle keeps its own |
 | `apn_user` | str ≤32 `""` | |
 | `apn_password` | str ≤32 `""` | redacted on GET, "" on PUT keeps it (the api_http `_password` rule); rides along whenever `apn` or `apn_user` change (it cannot be read back from the dongle) |
+| `sim_pin` | str ≤8 `""` | the SIM's PIN (2026-10-13): sent to the dongle as its `apn_pin` in the same PUT, once per boot and only while the dongle's health reports `sim: "pin"`; the dongle answers `pin_wrong` when the SIM refuses it and neither side retries by itself (three wrong tries lock the SIM) |
 | `cli` | bool `true` | |
 
 Migration v1 → v2 (`espnl_settings_migrate`, host-tested): a v1 object
@@ -255,6 +256,28 @@ and no reboot when nothing changed (§11). Recommended for the car:
 network while parked on the dongle); `interface_manager.sta_ble_handover`
 still suspends the STA while a BLE client is connected (dongle uplink
 drops: phase-2 exemption not built).
+
+## The SIM PIN and the GPS hint (2026-10-13)
+
+The two things the easy setup needed from the firmware, both small:
+
+- **The SIM PIN relay.** `sim_pin` rides the carrier PUT
+  (`ensure_dongle_carrier`) as the dongle's `apn_pin`, only when
+  `espnl_core_pin_relay_due()` says so: the WiCAN has one, the health read
+  over the cable a moment earlier says `sim: "pin"`, and this boot has not
+  sent it. The dongle restarts to apply it, enters it once, and reports
+  `pin_wrong` when the SIM refuses (its own latch keeps it from trying that
+  PIN again); the WiCAN never resends in that boot either, so a wrong PIN
+  costs one try, not the SIM. The UI shows the row from
+  `dongle.sim`; the value itself is never logged.
+- **The GPS hint.** `espnl_core_nofix_update()` counts the seconds the
+  WiCAN is away from home (the dongle is the uplink over USB and the
+  station is on nothing or on the dongle's own AP slot) with LTE up and no
+  fix anywhere (neither the cached one nor the dongle's); any break
+  restarts it. `/api/espnetlink` carries it as `gps_hint.no_fix_s` with the
+  verdict `no_fix` past `ESPNL_NOFIX_HINT_S` (600 s), and main's USB
+  summary puts the same verdict on `/api/status` for the web UI's bar and
+  header. The price of the USB modes on GPS: section "mode=usb_ncm".
 
 ## Memory footprint (measured 2026-08-24 unless noted)
 
@@ -283,7 +306,8 @@ rx-thread disconnect race (fixed in the vendored net class drivers,
 (`ESPNL REPAIR HAMMER PASS`) repeats `POST /api/espnetlink/repair` with
 traffic on the wire as the proof.
 
-Host suite (`host_test/`, **33 tests** since 2026-10-12: the health's
+Host suite (`host_test/`, **36 tests** since 2026-10-13: the GPS hint
+accumulator, the SIM PIN relay rule, the health's `pin_wrong`; 2026-10-12: the health's
 `usb_ethernet`, the console-only predicate, the USB-mode kick rule): identity, SSID match, the
 `/api/wifi_modem` / `/api/info` / credentials parsers (escapes, 403 body,
 oversize), the changed-key compare, URL build, the shared GPS parser with

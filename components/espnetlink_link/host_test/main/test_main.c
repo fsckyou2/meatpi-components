@@ -131,6 +131,69 @@ void test_health_parse_sim_states(void)
     TEST_ASSERT_EQUAL_STRING("", h.stage);
 }
 
+/* 2026-10-13: the dongle's "pin_wrong" (the SIM refused the PIN it holds) */
+void test_health_parse_pin_wrong(void)
+{
+    static const char *PIN_WRONG =
+        "{\"usb_mode\":\"auto\",\"usb_data\":true,\"napt\":false,"
+        "\"lte\":{\"valid\":false,\"sim\":\"pin_wrong\",\"stage\":\"not_started\"},"
+        "\"gps\":{\"valid\":false,\"fix\":false}}";
+    espnl_health_t h;
+
+    TEST_ASSERT_TRUE(espnl_core_parse_health(PIN_WRONG, &h));
+    TEST_ASSERT_EQUAL_STRING("pin_wrong", h.sim);
+    TEST_ASSERT_EQUAL_STRING("not_started", h.stage);
+}
+
+/* the GPS hint accumulator: counts only away from home on the wire with
+ * LTE up and no fix; any break restarts it; the clock may wrap */
+void test_nofix_rule(void)
+{
+    espnl_nofix_t acc = { 0 };
+    uint32_t t = 5000;
+
+    /* at home: never counts, however long */
+    TEST_ASSERT_EQUAL_UINT32(0, espnl_core_nofix_update(&acc, false, true, false, t));
+    t += 700000;
+    TEST_ASSERT_EQUAL_UINT32(0, espnl_core_nofix_update(&acc, false, true, false, t));
+    /* away, LTE up, no fix: counts from the first tick the condition holds */
+    TEST_ASSERT_EQUAL_UINT32(0, espnl_core_nofix_update(&acc, true, true, false, t));
+    t += 599000;
+    TEST_ASSERT_EQUAL_UINT32(599, espnl_core_nofix_update(&acc, true, true, false, t));
+    t += 1000;
+    TEST_ASSERT_EQUAL_UINT32(600, espnl_core_nofix_update(&acc, true, true, false, t));
+    TEST_ASSERT_TRUE(600 >= ESPNL_NOFIX_HINT_S);
+    /* a fix resets it, and it restarts from zero afterwards */
+    TEST_ASSERT_EQUAL_UINT32(0, espnl_core_nofix_update(&acc, true, true, true, t));
+    t += 1000;
+    TEST_ASSERT_EQUAL_UINT32(0, espnl_core_nofix_update(&acc, true, true, false, t));
+    t += 30000;
+    TEST_ASSERT_EQUAL_UINT32(30, espnl_core_nofix_update(&acc, true, true, false, t));
+    /* LTE down (the dongle still attaching) resets it too */
+    TEST_ASSERT_EQUAL_UINT32(0, espnl_core_nofix_update(&acc, true, false, false, t));
+    TEST_ASSERT_EQUAL_UINT32(0, espnl_core_nofix_update(NULL, true, true, false, t));
+    /* a wrap of the millisecond clock is harmless: 8192 ms across it */
+    acc.running = true;
+    acc.since_ms = 0xFFFFF000u;
+    TEST_ASSERT_EQUAL_UINT32(8, espnl_core_nofix_update(&acc, true, true, false, 0x1000u));
+}
+
+/* the SIM PIN relay: once per boot, only while the SIM asks, never after a
+ * rejection */
+void test_pin_relay_rule(void)
+{
+    TEST_ASSERT_TRUE(espnl_core_pin_relay_due("1234", "pin", false));
+    TEST_ASSERT_FALSE(espnl_core_pin_relay_due("1234", "pin", true));
+    TEST_ASSERT_FALSE(espnl_core_pin_relay_due("1234", "pin_wrong", false));
+    TEST_ASSERT_FALSE(espnl_core_pin_relay_due("1234", "ready", false));
+    TEST_ASSERT_FALSE(espnl_core_pin_relay_due("1234", "missing", false));
+    TEST_ASSERT_FALSE(espnl_core_pin_relay_due("1234", "unknown", false));
+    TEST_ASSERT_FALSE(espnl_core_pin_relay_due("1234", "", false));
+    TEST_ASSERT_FALSE(espnl_core_pin_relay_due("", "pin", false));
+    TEST_ASSERT_FALSE(espnl_core_pin_relay_due(NULL, "pin", false));
+    TEST_ASSERT_FALSE(espnl_core_pin_relay_due("1234", NULL, false));
+}
+
 void test_health_parse_lte_down(void)
 {
     espnl_health_t h;
@@ -412,6 +475,9 @@ void app_main(void)
     RUN_TEST(test_health_parse_usb_ethernet);
     RUN_TEST(test_console_only_predicate);
     RUN_TEST(test_usb_kick_due);
+    RUN_TEST(test_health_parse_pin_wrong);
+    RUN_TEST(test_nofix_rule);
+    RUN_TEST(test_pin_relay_rule);
     RUN_TEST(test_health_parse_garbage);
     RUN_TEST(test_info_parse);
     RUN_TEST(test_credentials_parse);

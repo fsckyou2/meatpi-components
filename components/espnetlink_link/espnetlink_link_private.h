@@ -53,6 +53,9 @@ typedef struct
     char apn[64];
     char apn_user[33];
     char apn_password[33];
+    /* the SIM's PIN: relayed once per boot while the dongle reports its SIM
+       locked ("" = none; 2026-10-13) */
+    char sim_pin[9];
     bool cli;
 } espnl_config_t;
 
