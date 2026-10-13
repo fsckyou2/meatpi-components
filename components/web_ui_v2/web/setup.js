@@ -39,7 +39,7 @@ const SKIP_KEY="wican-setup-skip";
 /* wizard state: survives in-page navigation and re-routes (module scope),
    not a reload on another address (the second half reads the device) */
 const W={cur:null,use:"ha",agree:[false,false,false],haInstalled:false,mdataOk:false,
-  apPw:"",apPw2:"",showPw:false,
+  apPw:"",apPw2:"",showPw:false,noWifi:false,alone:false,
   ssid:"",wifiAuth:"",wifiPw:"",manual:false,nets:null,scanErr:null,
   /* after it joins (2026-10-07): "sta" = Station only (recommended), "apsta"
      with apAuto = the access point off while WiCAN is on the network */
@@ -52,7 +52,7 @@ const W={cur:null,use:"ha",agree:[false,false,false],haInstalled:false,mdataOk:f
      looked yet), live = the four routes' last answers, nlMode = how the
      ESPNetLink is used ("wifi_modem" | "usb"), ethFirst = the cable before
      WiFi, hostFix = switch a device-mode connector back to host */
-  usb:{kind:null,live:null,nlMode:null,ethFirst:null,hostFix:false,apn:"",apnUser:"",apnPw:"",apnSeeded:false},
+  usb:{kind:null,live:null,nlMode:null,ethFirst:null,hostFix:false,apn:"",apnUser:"",apnPw:"",apnSeeded:false,pin:""},
   /* testing = {ssid,pw,t0} while a test runs: the page re-routes after the
      access point's blink (offline, then online again) and rebuilds this
      screen, so the new screen picks the running test up from here */
@@ -454,6 +454,20 @@ SCREENS.wifi=async()=>{
   const pwLabel=h("label",{for:"qs-wifi-pw"},"Password");
   const pwHelp=h("div",{class:"help"});
   const testBox=h("div",{});
+  /* no home WiFi (2026-10-13): a dongle with a SIM on the cable is an internet
+     of its own; the offer shows while the connector says so */
+  const nlOffer=h("div",{});
+  const paintOffer=L=>{
+    const e=L&&L.e,d=(e&&e.dongle)||{};
+    const ok=L&&L.kind==="espnetlink"&&d.valid&&d.sim!=="missing";
+    if(!ok){nlOffer.replaceChildren();return;}
+    const net=d.operator?d.operator+(d.network_type?" ("+d.network_type+")":""):"";
+    if(nlOffer.childElementCount)return;
+    nlOffer.replaceChildren(h("div",{class:"qs-nlcard qs-offer"},check("","signal","No home WiFi here? Use the ESPNetLink.",
+      ["WiCAN found an ESPNetLink with a SIM on the cable"+(net?" ("+net+")":"")+". Skip this step: WiCAN gets its internet over LTE wherever the car is, and this phone keeps reaching it on ",h("code",{},apName()),"."],
+      btn("Use the ESPNetLink, no home WiFi",()=>{W.noWifi=true;W.ssid="";W.wifiPw="";W.tested=null;W.wifiMode="apsta";W.apAuto=false;go("usb");},"sm",{icon:"signal"}))));
+  };
+  usbLive().then(paintOffer);every(3000,()=>usbLive().then(paintOffer));
   /* after it joins (Ali, 2026-10-07): Station only, recommended, or Access
      point + Station with the access point off while WiCAN is on the network
      (wifi_manager's ap_auto_disable, back whenever the station is lost). A
@@ -492,7 +506,7 @@ SCREENS.wifi=async()=>{
       actions:[{label:"Continue",kind:"pri",fn:()=>{W.mdataOk=true;testWifi();}}]});
     const m=document.querySelector("#modal-root .modal");if(m)m.classList.add("qs-pop-modal");
   };
-  const next=btn("Test and continue",()=>{if(passed()||(W.ssid===stored&&!W.wifiPw))go("usb");else if(onAp()&&!W.mdataOk)askMobileData();else testWifi();},"pri",{icon:"wifi"});
+  const next=btn("Test and continue",()=>{W.noWifi=false;if(passed()||(W.ssid===stored&&!W.wifiPw))go("usb");else if(onAp()&&!W.mdataOk)askMobileData();else testWifi();},"pri",{icon:"wifi"});
   const selNet=()=>(W.nets||[]).find(n=>n.ssid===W.ssid);
   const update=()=>{
     const n=selNet();const open=n?isOpen(n):false;W.wifiAuth=n?netAuth(n):"";
@@ -594,7 +608,7 @@ SCREENS.wifi=async()=>{
   const rescan=btn("Scan again",scan,"sm",{icon:"refresh"});
   const manual=h("input",{id:"qs-man-ssid",placeholder:"exact name, case matters",value:W.manual?W.ssid:"",oninput:e=>{W.ssid=e.target.value.trim();W.manual=true;update();}});
   const el=screen("Join your home WiFi","Pick the network your phone, Home Assistant or broker are on. WiCAN joins it after the restart.",
-    [h("div",{class:"rowflex",style:"flex-wrap:wrap"},count,grow(),rescan),list,openWarn,
+    [nlOffer,h("div",{class:"rowflex",style:"flex-wrap:wrap"},count,grow(),rescan),list,openWarn,
      h("details",{class:"qs-details",open:W.manual||null},h("summary",{},"Network not listed? Enter it by hand"),
        row("Network name (SSID)",manual,"Hidden networks and 5 GHz-only names do not appear in the scan. WiCAN connects on 2.4 GHz.")),
      h("div",{class:"qs-row"},pwLabel,h("div",{class:"ctl"},pwInp),pwHelp),modeBox,testBox],
@@ -651,16 +665,23 @@ function nlRows(e){
   const sim=d.sim||(d.attached||d.lte_connected?"ready":"unknown");
   const rows=[];
   rows.push(["SIM",sim==="ready"?[chip("Found","ok")]:sim==="missing"?[chip("Not found","crit"),h("span",{class:"d2"},"Insert a SIM, then plug the dongle in again.")]
-    :sim==="pin"?[chip("PIN locked","warn"),h("span",{class:"d2"},"The PIN goes under Settings > USB.")]:[h("span",{class:"d2"},"Not read yet")]]);
+    :sim==="pin"?[chip("PIN locked","warn"),h("span",{class:"d2"},"Enter the SIM's PIN under Carrier settings, below.")]
+    :sim==="pin_wrong"?[chip("PIN rejected","crit"),h("span",{class:"d2"},"The SIM refused the PIN. Check it below; nothing is retried by itself, a third wrong try locks the SIM.")]:[h("span",{class:"d2"},"Not read yet")]]);
   if(sim!=="missing"){
     rows.push(["Network",d.operator?[h("span",{},d.operator+(d.network_type?" ("+d.network_type+")":""))]:[chip(d.attached?"Attached":"Searching","warn")]]);
     rows.push(["Signal",d.rssi_dbm?[h("span",{class:"bars"},bars(d.rssi_dbm)),h("span",{},d.rssi_dbm+" dBm, "+sigWord(d.rssi_dbm)),d.rssi_dbm<-80?h("span",{class:"d2"},"A window or an external antenna helps."):null]:[h("span",{class:"d2"},"No reading yet")]]);
     rows.push(["Internet",d.lte_connected?[chip("Connected","ok"),d.ip?h("code",{},d.ip):null]:[chip(d.stage==="connecting"||d.attached?"Connecting":"Not connected","warn")]]);}
   const sats=(e.gps||{}).satellites;
-  rows.push(["GPS",d.gps_fix?[chip("Fix","ok"),sats?h("span",{},sats+" satellites"):null]:[chip("No fix yet",""),h("span",{class:"d2"},"Needs a view of the sky."+(nlUsbMode(e.mode)?" If it never gets one on USB Ethernet, switch to WiFi modem.":""))]]);
+  const nf=(e.gps_hint&&e.gps_hint.no_fix_s)||0;
+  rows.push(["GPS",d.gps_fix?[chip("Fix","ok"),sats?h("span",{},sats+" satellites"):null]:nf>=600?[chip("No fix after "+Math.round(nf/60)+" min","warn"),h("span",{class:"d2"},"On USB Ethernet the cable can disturb the reception: switch to WiFi modem, below.")]:[chip("No fix yet",""),h("span",{class:"d2"},"Needs a view of the sky."+(nlUsbMode(e.mode)?" If it never gets one on USB Ethernet, switch to WiFi modem.":""))]]);
   if(e.apn)rows.push(["APN",[h("code",{},e.apn)]]);
   return h("dl",{class:"qs-kv qs-nlrows"},...rows.flatMap(([k,v])=>[h("dt",{},k),h("dd",{},...v.filter(Boolean))]));
 }
+/* the Checks card on the no-home-WiFi path (2026-10-13): the dongle is the internet */
+const nlNetCard=L=>{const e=(L&&L.e)||{},d=e.dongle||{};
+  const net=[d.operator||"",d.network_type||"",d.rssi_dbm?d.rssi_dbm+" dBm, "+sigWord(d.rssi_dbm):""].filter(Boolean).join(", ");
+  return d.lte_connected?check("ok","signal","Internet via ESPNetLink: connected",[net+". Address ",h("code",{},d.ip||""),". "+(d.gps_fix?"GPS fix.":"GPS: no fix yet, it needs a view of the sky.")],chip("Connected","ok"))
+    :check("warn","signal","Internet via ESPNetLink: not connected yet",[d.sim==="missing"?"No SIM in the dongle.":d.sim==="pin"?"The SIM asks for its PIN: enter it below.":d.sim==="pin_wrong"?"The SIM refused the PIN: check it below.":"The dongle is still attaching to the network (usually under a minute)."],chip("Connecting","warn"));};
 /* one reading of the connector for the step's card, the Checks card and the
    Done row: state ok / warn / run / pend (settled after the restart) */
 function usbSummary(L){
@@ -681,7 +702,7 @@ function usbSummary(L){
       const usbUp=e.uplink==="espnetlink_usb"||(nlUsbMode(e.mode)&&onIt);
       const text=onIt?["WiCAN is on the dongle "+(usbUp?"over the cable":"over its WiFi ")+(usbUp?"":""),!usbUp&&e.ssid?h("code",{},e.ssid):null,"."]
         :["Paired as "+(nlUsbMode(e.mode)?"USB Ethernet":"WiFi modem")+". WiCAN uses it whenever your home WiFi is out of range, in the car: internet over LTE, and GPS. Right now WiCAN is on your home WiFi, so the dongle stands by."];
-      return {state:noSim?"warn":"ok",icon:"signal",title:noSim?"ESPNetLink paired, no SIM in it":"ESPNetLink paired",text,chip:noSim?["No SIM","warn"]:[onIt?"In use":"Standing by","ok"],rows:nlRows(e)};}
+      return {state:noSim?"warn":"ok",icon:"signal",title:noSim?"ESPNetLink found, no SIM in it":(usbUp?"ESPNetLink connected":"ESPNetLink paired"),text,chip:noSim?["No SIM","warn"]:[onIt?"In use":"Standing by","ok"],rows:nlRows(e)};}
     return {state:"run",icon:"signal",title:"Pairing with the ESPNetLink",text:["WiCAN reads the dongle's key over the cable"+(nlUsbMode(e.mode)?"":", then leaves the cable as power only")+". When the key is new WiCAN restarts once more by itself; this page waits."],chip:["Pairing","warn"],rows:nlRows(e)};
   }
   if(kind==="eth"){
@@ -712,11 +733,11 @@ function usbReview(item,line){
   const L=W.usb.live,k=L&&L.kind;
   if(W.usb.hostFix)return [item("pend","USB connector","Host mode after the restart",null,line("Plug the device in afterwards","the Checks screen shows it"))];
   if(!k||k==="none"||k==="unknown")return [];
-  if(k==="espnetlink"){const e=L.e||{},paired=!!(e.paired||((e.usb||{}).pair_state==="done"));
+  if(k==="espnetlink"){const e=L.e||{},pst=(e.usb||{}).pair_state,paired=!!(e.paired||pst==="done"||pst==="ncm_up");
     const switching=nlUsbMode(e.mode)!==(W.usb.nlMode==="usb");
-    const apn=W.usb.apn.trim(),apnNew=apn!==((D.espnl&&D.espnl.apn)||"")||!!W.usb.apnPw||W.usb.apnUser!==((D.espnl&&D.espnl.apn_user)||"");
+    const apn=W.usb.apn.trim(),apnNew=apn!==((D.espnl&&D.espnl.apn)||"")||!!W.usb.apnPw||W.usb.apnUser!==((D.espnl&&D.espnl.apn_user)||"")||!!W.usb.pin;
     return [item(paired&&!switching&&!apnNew?"ok":"pend","USB connector","ESPNetLink",line(...[W.usb.nlMode==="usb"?"USB Ethernet":"WiFi modem",apn?"APN "+apn:""].filter(Boolean)),
-      paired?(switching?line("Switches at the restart","the dongle reboots once to change its USB class"):line("Paired",e.ssid||""))
+      paired?(switching?line("Switches at the restart","the dongle reboots once to change its USB class"):pst==="ncm_up"?line("Connected over the cable","nothing to do at the restart"):line("Paired",e.ssid||""))
         :line("Pairs after the restart","WiCAN restarts once more by itself to store the dongle's key"),
       !paired&&switching?line("Then "+(W.usb.nlMode==="usb"?"USB Ethernet":"WiFi modem"),"the dongle reboots once to change its USB class"):null,
       apnNew?line("Carrier settings sent to the dongle","it restarts once to apply them"):null)];}
@@ -726,6 +747,24 @@ function usbReview(item,line){
     const off=!!(L.acm&&L.acm.gps===false);
     return [item(g&&g.valid?"ok":off?"warn":"pend","USB connector","USB GPS receiver",dev.product?line(dev.product):null,g&&g.valid?line(g.satellites+" satellites","published with the vehicle data"):off?line("Switched off","USB > Settings"):line("Waiting for a fix","needs a view of the sky"))];}
   return [];
+}
+
+async function saveAlone(saveBtn){
+  const L=W.usb.live;
+  if(!L||L.kind!=="espnetlink"||!D.espnl){toast("No ESPNetLink on the cable: nothing to save","ok");return;}
+  const nv=strip(D.espnl);const toUsb=W.usb.nlMode==="usb";
+  const apn=W.usb.apn.trim(),apnUser=W.usb.apnUser.trim();
+  const apnNew=apn!==(nv.apn||"")||apnUser!==(nv.apn_user||"")||!!W.usb.apnPw;
+  const pinNew=!!W.usb.pin.trim();
+  const modeNew=toUsb!==nlUsbMode(nv.mode);
+  if(nv.enabled&&!modeNew&&!apnNew&&!pinNew){toast("Nothing to change: the dongle is set up","ok");return;}
+  nv.enabled=true;
+  if(modeNew)nv.mode=toUsb?"usb_rndis":"wifi_modem";
+  if(apnNew){nv.apn=apn;nv.apn_user=apnUser;if(W.usb.apnPw)nv.apn_password=W.usb.apnPw;}
+  if(pinNew)nv.sim_pin=W.usb.pin.trim();
+  saveBtn.disabled=true;
+  try{store.stage("espnetlink",nv);await store.commit("ESPNetLink: saving and restarting");D.espnl=nv;W.usb.pin="";W.usb.apnPw="";}
+  catch(e){store.unstage("espnetlink");saveBtn.disabled=false;toast("WiCAN did not accept the settings: "+(e.message||e),"err");}
 }
 
 SCREENS.usb=async()=>{
@@ -743,10 +782,14 @@ SCREENS.usb=async()=>{
   const paintChoice=kind=>{
     if(kind==="espnetlink"&&D.espnl){
       const inp=(id,key,attrs={})=>h("input",{id,value:W.usb[key]||"",...attrs,oninput:e=>{W.usb[key]=e.target.value;}});
-      choice.replaceChildren(sub("How WiCAN uses it"),h("div",{class:"qs-radios",style:"gap:8px"},
+      const live=W.usb.live||{},ed=((live.e||{}).dongle)||{},nf=(((live.e||{}).gps_hint)||{}).no_fix_s||0;
+      const pinLocked=ed.sim==="pin"||ed.sim==="pin_wrong";
+      const nudgeCard=()=>(nf>=600&&W.usb.nlMode==="usb")?check("warn","navigation","No GPS fix after "+Math.round(nf/60)+" minutes on USB Ethernet",["The cable can disturb the dongle's GPS reception. WiFi modem gives it the best reception: the cable carries power only and WiCAN joins the dongle's own WiFi."+(W.alone?" WiCAN restarts once.":"")],btn("Switch to WiFi modem",()=>{W.usb.nlMode="wifi_modem";paintChoice(kind);},"sm")):null;
+      choice.replaceChildren(...[nudgeCard()].filter(Boolean),sub("How WiCAN uses it"),h("div",{class:"qs-radios",style:"gap:8px"},
         radio("qs-nl","qs-nl-usb",W.usb.nlMode==="usb","USB Ethernet (recommended)","The dongle is a wired network adapter on the cable: always on, nothing to join, internet over LTE the moment the cable is in. If the GPS never gets a fix this way (the USB link can disturb its reception), switch to WiFi modem under Settings > USB.",()=>{W.usb.nlMode="usb";paintChoice(kind);}),
         radio("qs-nl","qs-nl-wifi",W.usb.nlMode==="wifi_modem","WiFi modem","The cable carries power only. WiCAN joins the dongle's own WiFi whenever your home WiFi is out of range. The GPS gets its best reception this way.",()=>{W.usb.nlMode="wifi_modem";paintChoice(kind);})),
-        h("details",{class:"qs-details",open:W.usb.apn?true:null},h("summary",{},"Carrier settings (optional)"),
+        h("details",{class:"qs-details",open:(W.usb.apn||pinLocked)?true:null},h("summary",{},pinLocked?"SIM PIN and carrier settings":"Carrier settings (optional)"),
+          pinLocked?row("SIM PIN",inp("qs-pin","pin",{type:"password",maxlength:"8",inputmode:"numeric",placeholder:D.espnl.sim_pin?"stored, type to replace":"4 to 8 digits",autocomplete:"off"}),"WiCAN sends it to the dongle once. A wrong PIN is never tried again by itself: three wrong tries lock the SIM (the PUK is on the SIM's card)."):null,
           row("APN",inp("qs-apn","apn",{placeholder:"leave blank for the carrier default"}),"Only if your carrier gave you one: most SIMs work without it. WiCAN sends it to the dongle, which restarts once to apply it."),
           row("Username",inp("qs-apn-user","apnUser",{placeholder:"optional"})),
           row("Password",inp("qs-apn-pw","apnPw",{type:"password",placeholder:D.espnl.apn_password?"unchanged, type to replace":"optional",autocomplete:"new-password"}))));
@@ -776,8 +819,17 @@ SCREENS.usb=async()=>{
     paintTiles(L.kind);paintCard(L);if(prev!==L.kind||!choice.childElementCount)paintChoice(L.kind);
   };
   await refresh();every(3000,refresh);
-  return screen("What is on the USB connector?","WiCAN's USB port takes an ESPNetLink, a USB Ethernet adapter or a GPS receiver. Plug it in now: WiCAN names it here. Nothing to plug in? Just continue.",
-    [tilesEl,card,choice],[back("wifi"),grow(),btn("Continue",()=>go("review"),"pri")]);
+  const nwNote=W.noWifi?note("",["WiCAN keeps its own access point on, ",h("code",{},apName()),": with no home network it is the way to reach WiCAN. Internet comes over the dongle wherever the car is."]):null;
+  const simNow=((((W.usb.live||{}).e||{}).dongle)||{}).sim,pinNow=simNow==="pin"||simNow==="pin_wrong";
+  /* the screen on its own saves itself: the espnetlink object staged and
+     committed like the wizard's save (reboot-to-apply); nothing changed =
+     no write, no restart */
+  const saveBtn=btn(pinNow?"Send PIN and save":"Save",()=>saveAlone(saveBtn),"pri",{icon:"check"});
+  const foot=W.alone?[btn("Not now",()=>{location.hash="#/status";},"gh sm"),grow(),saveBtn]
+    :[back("wifi"),grow(),btn("Continue",()=>go("review"),"pri")];
+  return screen(W.alone?"On the cable now":W.noWifi?"Your ESPNetLink":"What is on the USB connector?",
+    W.alone?"Read live, every 3 seconds.":W.noWifi?"It is WiCAN's internet: LTE wherever the car is, and GPS. One choice to make.":"WiCAN's USB port takes an ESPNetLink, a USB Ethernet adapter or a GPS receiver. Plug it in now: WiCAN names it here. Nothing to plug in? Just continue.",
+    [W.alone?null:tilesEl,card,choice,nwNote],foot);
 };
 
 SCREENS.review=()=>{
@@ -808,15 +860,16 @@ SCREENS.review=()=>{
   const link=tested?"http://"+tested.ip+"/"+resumeHash():"";
   const kv=h("ul",{class:"qs-rv"},
     item("ok","Access point",apName(),line(W.apPw?"New password":"Password kept"),
-      sta?line("Off after the restart","hold the button 5 s to bring it up when needed"):auto?line("Off while WiCAN is on "+W.ssid,"back whenever "+W.ssid+" is lost"):null),
-    item(wifiState,"Home WiFi",W.ssid,line(auth,sta?"Station only":"Access point + Station"),wifiVerdict),
+      W.noWifi?line("Stays on","the way to reach WiCAN without a home network"):sta?line("Off after the restart","hold the button 5 s to bring it up when needed"):auto?line("Off while WiCAN is on "+W.ssid,"back whenever "+W.ssid+" is lost"):null),
+    W.noWifi?item("ok","Home WiFi","None",line("Internet over the ESPNetLink"),line("Access point + Station","the access point stays on")):item(wifiState,"Home WiFi",W.ssid,line(auth,sta?"Station only":"Access point + Station"),wifiVerdict),
     useItem,
     ...usbReview(item,line),
     item("pend","Vehicle data","Profile, protocol and standard PIDs",null,line("Configured after the restart.")));
-  const step2=sta?["Your phone drops off "+apName()+" for good","The access point turns off; WiCAN lives on "+W.ssid+" from now on."]
+  const apLinkR="http://"+((D.wifi&&D.wifi.ap_ip)||"192.168.0.10")+"/"+resumeHash();
+  const step2=W.noWifi?[W.apPw?"Your phone drops off "+apName():"Your phone may drop off "+apName()+" for a moment","Join it again with your new password: the access point is back within about 20 seconds."]:sta?["Your phone drops off "+apName()+" for good","The access point turns off; WiCAN lives on "+W.ssid+" from now on."]
     :auto?["Your phone drops off "+apName()+" once WiCAN is on "+W.ssid,"The access point turns off while WiCAN is on your network and comes back whenever "+W.ssid+" is lost."]
     :[W.apPw?"Your phone drops off "+apName():"Your phone may drop off "+apName()+" for a moment",W.apPw?"The access point comes back with the new password.":"The access point comes back with the same password."];
-  const step3=link?["Connect your phone to "+W.ssid+" and open "+link,"Quick Setup continues there; the next screen has the link and a Copy button."]
+  const step3=W.noWifi?["Quick Setup continues here","Same address: "+apLinkR+". The next screen waits for WiCAN to come back."]:link?["Connect your phone to "+W.ssid+" and open "+link,"Quick Setup continues there; the next screen has the link and a Copy button."]
     :["Connect your phone to "+W.ssid+" and open WiCAN's address there","The next screen says how to find it."];
   return screen("Review, then restart","Everything below is saved together in one restart. Nothing has been written to WiCAN yet.",
     [kv,err,sub("What happens next"),
@@ -830,10 +883,17 @@ async function applyAll(saveBtn,errEl){
   try{
     if(!D.wifi)D.wifi=strip(await api("/api/settings/wifi_manager"));
     const wf=strip(D.wifi);
-    wf.mode=W.wifiMode==="sta"?"sta":"apsta";
-    if(W.wifiMode==="apsta")wf.ap_auto_disable=!!W.apAuto;
-    wf.sta_ssid=W.ssid;wf.sta_trusted=true;
-    if(W.wifiPw)wf.sta_password=W.wifiPw;
+    if(W.noWifi){
+      /* no home WiFi (2026-10-13): the access point is the way in, so it
+         stays on; the station holds no network (WiFi modem's fallback join
+         still has it); auto-off would count the dongle's own WiFi as a
+         network and switch the access point off */
+      wf.mode="apsta";wf.ap_auto_disable=false;wf.sta_ssid="";}
+    else{
+      wf.mode=W.wifiMode==="sta"?"sta":"apsta";
+      if(W.wifiMode==="apsta")wf.ap_auto_disable=!!W.apAuto;
+      wf.sta_ssid=W.ssid;wf.sta_trusted=true;
+      if(W.wifiPw)wf.sta_password=W.wifiPw;}
     if(W.apPw)wf.ap_password=W.apPw;
     store.stage("wifi_manager",wf);staged.push("wifi_manager");
     D.wifi=wf;   /* the screens after the restart read the mode from here until the reload */
@@ -860,10 +920,12 @@ async function applyAll(saveBtn,errEl){
     if(uk==="espnetlink"&&D.espnl){const nv=strip(D.espnl);const toUsb=W.usb.nlMode==="usb";
       const apn=W.usb.apn.trim(),apnUser=W.usb.apnUser.trim();
       const apnNew=apn!==(nv.apn||"")||apnUser!==(nv.apn_user||"")||!!W.usb.apnPw;
-      if(!nv.enabled||toUsb!==nlUsbMode(nv.mode)||apnNew){
+      const pinNew=!!W.usb.pin;   /* the SIM PIN (2026-10-13): write-only here */
+      if(!nv.enabled||toUsb!==nlUsbMode(nv.mode)||apnNew||pinNew){
         nv.enabled=true;
         if(toUsb!==nlUsbMode(nv.mode))nv.mode=toUsb?"usb_rndis":"wifi_modem";   /* a dongle already on NCM keeps it */
         if(apnNew){nv.apn=apn;nv.apn_user=apnUser;if(W.usb.apnPw)nv.apn_password=W.usb.apnPw;}
+        if(pinNew)nv.sim_pin=W.usb.pin.trim();
         store.stage("espnetlink",nv);staged.push("espnetlink");D.espnl=nv;}}
     if(uk==="eth"&&D.usbhost&&!W.usb.hostFix){const uv=strip(D.usbhost);
       if(!!uv.prefer_usb_route!==!!W.usb.ethFirst){uv.prefer_usb_route=!!W.usb.ethFirst;store.stage("usb_host_manager",uv);staged.push("usb_host_manager");D.usbhost=uv;}}
@@ -900,7 +962,23 @@ async function applyAll(saveBtn,errEl){
    (the origin is the AP), and an opaque answer cannot prove it is WiCAN
    (Ali, 2026-10-06). */
 const RECONNECT_PATIENCE_S=40;   /* a restart (about 15 s) plus the join */
+/* the no-home-WiFi path (2026-10-13): the phone stays on the access point;
+   WiCAN restarts and the AP comes back with the new password */
+async function reconnectAp(){
+  const apLink="http://"+((D.wifi&&D.wifi.ap_ip)||"192.168.0.10")+"/"+resumeHash();
+  const live=h("div",{});const t0=Date.now();const since=()=>Math.round((Date.now()-t0)/1000);
+  const paintLive=()=>{
+    if(conn.state==="online"&&since()>=12){live.replaceChildren(check("ok","wifi","WiCAN is back",["This phone is on ",h("code",{},apName())," again. Quick Setup continues."],btn("Continue",()=>go("checks"),"sm pri")));return;}
+    if(since()<RECONNECT_PATIENCE_S)live.replaceChildren(check("run",null,"Restarting","About 15 s, then "+apName()+" is back with your new password. If this phone does not rejoin it by itself, join it from the WiFi list."));
+    else live.replaceChildren(check("warn","alert","Still waiting for "+apName(),["Open the WiFi list on this phone and join ",h("code",{},apName())," with the password you set; a phone sometimes goes back to another saved network. Then open ",h("a",{href:apLink},apLink),"."]));
+  };
+  paintLive();every(3000,paintLive);
+  return screen("Join WiCAN's network again",["WiCAN restarts and ",h("b",{},apName())," comes back with your new password. Reconnect this phone to it; this page continues by itself."],
+    [h("div",{class:"qs-link"},h("span",{class:"url"},apLink)),live],
+    [h("span",{class:"ghost"},"Stay on this screen until WiCAN is back.")]);
+}
 SCREENS.reconnect=async()=>{
+  {const L0=W.usb.live||await usbLive();if(W.noWifi||(!W.ssid&&!(D.wifi&&D.wifi.sta_ssid)&&L0.kind==="espnetlink"))return reconnectAp();}
   const ssid=W.ssid||(D.wifi&&D.wifi.sta_ssid)||"your home WiFi";
   const sta=W.wifiMode==="sta";
   const apLink="http://"+((D.wifi&&D.wifi.ap_ip)||"192.168.0.10")+"/"+resumeHash();
@@ -1005,23 +1083,26 @@ SCREENS.checks=async()=>{
   if(!D.wifi){const ws=await tryGet("/api/settings/wifi_manager");if(ws)D.wifi=strip(ws);}   /* the mode, after the restart's reload */
   const mqttOn=!!(D.mqtt&&D.mqtt.enabled)||W.use==="mqtt";
   const haOn=W.use==="ha"||(!mqttOn&&W.use!=="wifi")||W.use==="wifi"&&false;
+  const L0=await usbLive();const nw=W.noWifi||(!(D.wifi&&D.wifi.sta_ssid)&&L0.kind==="espnetlink");
   const refresh=async()=>{
     const[w,wh,ds,L]=await Promise.all([tryGet("/api/wifi/status"),haOn?tryGet("/api/webhook"):null,mqttOn?tryGet("/api/destinations"):null,usbLive()]);
     const b=(conn.status&&conn.status.bits)||{};
     const ssid=W.ssid||(w&&w.sta_attempt&&w.sta_attempt.ssid)||(D.wifi&&D.wifi.sta_ssid)||"your WiFi";
     const out=[];
-    if(w&&w.sta_connected)out.push(check("ok","wifi","WiFi: joined "+ssid,["Address ",h("code",{},w.ip||""),"; your router's device list shows it as ",h("code",{},routerName()),"."],chip("Connected","ok")));
+    if(nw)out.push(nlNetCard(L));else if(w&&w.sta_connected)out.push(check("ok","wifi","WiFi: joined "+ssid,["Address ",h("code",{},w.ip||""),"; your router's device list shows it as ",h("code",{},routerName()),"."],chip("Connected","ok")));
     else out.push(check("warn","wifi","WiFi: not connected"+(w&&w.sta_attempt&&w.sta_attempt.ssid?" to "+w.sta_attempt.ssid:""),
       w&&w.sta_attempt&&w.sta_attempt.fail_count?"Last attempt failed (reason "+w.sta_attempt.reason+"). Check the password.":"WiCAN is still trying, or the network is out of range.",btn("Fix WiFi",()=>go("wifi"),"sm")));
     const wm=(D.wifi&&D.wifi.mode)||"apsta",autoOff=!!(D.wifi&&D.wifi.ap_auto_disable);
-    if(wm==="sta")out.push(check("ok","lock","Access point off: Station only",["WiCAN is reached at its address on "+ssid+". Hold its button for 5 seconds whenever you need ",h("code",{},apName())," back for a while."],chip("Off","")));
+    if(nw)out.push(check("ok","lock","Access point on, secured",[h("code",{},apName())," uses your password and stays on: it is the way to reach WiCAN."],chip("On","ok")));
+    else if(wm==="sta")out.push(check("ok","lock","Access point off: Station only",["WiCAN is reached at its address on "+ssid+". Hold its button for 5 seconds whenever you need ",h("code",{},apName())," back for a while."],chip("Off","")));
     else if(autoOff&&w&&w.sta_connected)out.push(check("ok","lock","Access point off while WiCAN is on "+ssid,[h("code",{},apName())," comes back by itself whenever "+ssid+" is lost, with your password."],chip("Off for now","")));
     else if(w&&w.ap_default_password===false||(!w&&!apDefaultPassword()))out.push(check("ok","lock","Access point secured",[h("code",{},apName())," now uses your password. It stays on as a fallback way in."],chip("Done","ok")));
     else out.push(check("warn","lock","Access point still has the factory password","Set your own password so nobody else can join.",btn("Set password",()=>go("ap"),"sm")));
     /* the USB connector, from the device: a page that arrived by the link has no step state */
     const us=L.kind!=="unknown"?usbSummary(L):null;
     if(us)out.push(usbCard(us,us.state==="pend"?"warn":us.state));
-    if(haOn){
+    if(haOn&&nw){out.push(check("warn","home","Home Assistant needs the VPN away from home",["WiCAN is on the internet over LTE; Home Assistant is on your home network. Set up WiCAN's VPN under Settings > VPN after this, and Home Assistant finds WiCAN there. Nothing to do now."],h("a",{class:"btn sm",href:"#/settings/vpn"},"VPN settings")));}
+    else if(haOn){
       const url=wh&&wh.url;
       if(url){const host=(()=>{try{return new URL(url).origin;}catch(_){return url;}})();
         const age=wh.last_post?Math.max(0,Math.round((Date.now()-Date.parse(wh.last_post))/1000)):null;
@@ -1038,7 +1119,7 @@ SCREENS.checks=async()=>{
     cards.replaceChildren(...out);
   };
   await refresh();every(3000,refresh);
-  return screen("Connected through "+(W.ssid||(D.wifi&&D.wifi.sta_ssid)||"your WiFi"),"You are now reaching WiCAN over your home WiFi. Quick checks before the vehicle part.",
+  return screen(nw?"Connected through the ESPNetLink":"Connected through "+(W.ssid||(D.wifi&&D.wifi.sta_ssid)||"your WiFi"),nw?"WiCAN is on the internet over LTE. Quick checks before the vehicle part.":"You are now reaching WiCAN over your home WiFi. Quick checks before the vehicle part.",
     [cards],
     [btn("Finish without vehicle data",()=>{W.noVeh=true;go("done");},"gh sm"),grow(),btn("Set up my vehicle",()=>go("vehicle"),"pri",{icon:"car"})]);
 };
@@ -1737,5 +1818,20 @@ PAGES.__setup=async(view,subId)=>{
   if(!D.wifi)D.wifi=strip(await tryGet("/api/settings/wifi_manager"));
   paint();
   return ()=>{stopTimers();railEl=null;scrEl=null;};
+};
+
+/* ---------- the ESPNetLink screen on its own (2026-10-13): the USB step with
+   its own Save, reached from the banner, Settings > USB and #/espnetlink ---------- */
+PAGES.__espnetlink=async(view)=>{
+  if(!document.getElementById("qs-css"))document.head.append(h("style",{id:"qs-css"},CSS));
+  if(!document.getElementById("qs-alone-css"))document.head.append(h("style",{id:"qs-alone-css"},".qs.qs-single{grid-template-columns:minmax(0,1fr);max-width:820px}.qs-offer{margin-bottom:2px}"));
+  const p=page(view,null,"ESPNetLink","What WiCAN found on the cable and how it uses it. USB Ethernet needs nothing from you; the carrier settings and the GPS choice are here when they matter.",
+    [h("button",{class:"btn sm gh",type:"button",onclick:()=>{location.hash="#/usb";}},"Settings > USB")]);
+  railEl=null;scrEl=h("section",{class:"qs-screen","aria-live":"polite"});
+  p.append(h("div",{class:"qs qs-single"},scrEl));
+  W.cur="usb";W.alone=true;
+  if(!D.wifi)D.wifi=strip(await tryGet("/api/settings/wifi_manager"));
+  scrEl.replaceChildren(await SCREENS.usb());
+  return ()=>{stopTimers();scrEl=null;W.alone=false;};
 };
 })();

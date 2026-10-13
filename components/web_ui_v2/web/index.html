@@ -121,6 +121,9 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--primary);outline-of
 .conn-pill .cid{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--text)}
 .conn-pill .cbar{width:1px;height:13px;background:var(--border-strong)}
 .conn-pill .cip{font-family:var(--mono);font-size:12px;color:var(--text-2)}
+.conn-pill .cusb{font-family:var(--mono);font-size:12px;color:var(--text-2);white-space:nowrap}
+.conn-pill .cusb b{font-weight:700;color:var(--text)}.conn-pill .cusb .ok{color:var(--success)}.conn-pill .cusb .warn{color:var(--warning)}
+.conn-pill .cusb[hidden],.conn-pill .cbar[hidden]{display:none}
 .conn-pill .ctag{font-size:10px;font-weight:700;color:var(--text-3);letter-spacing:.04em;
   padding:1px 5px;background:var(--surface-3);border-radius:4px}
 .hspacer{flex:1}
@@ -147,6 +150,17 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--primary);outline-of
 #sleepbar a{white-space:nowrap;font-weight:700}
 #sleepbar.crit{background:var(--warning-tint);border-bottom-color:color-mix(in srgb,var(--warning) 35%,transparent)}
 #sleepbar.crit svg{color:var(--warning)}
+#nlbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:10px;padding:9px 32px;font-size:13px;font-weight:550;
+  color:var(--text-2);background:var(--primary-tint);border-bottom:1px solid color-mix(in srgb,var(--primary) 25%,transparent)}
+#nlbar[hidden]{display:none}
+#nlbar svg{width:16px;height:16px;flex:none;color:var(--primary)}
+#nlbar b{color:var(--text);font-variant-numeric:tabular-nums}
+#nlbar .sb-hold{margin-left:auto;white-space:nowrap}
+#nlbar .sb-hold[hidden]{display:none}
+#nlbar .sb-hold[hidden]~a{margin-left:auto}
+#nlbar a{white-space:nowrap;font-weight:700}
+#nlbar.crit{background:var(--warning-tint);border-bottom-color:color-mix(in srgb,var(--warning) 35%,transparent)}
+#nlbar.crit svg{color:var(--warning)}
 /* Logger page (meatpi 2026-09-06): state chips + per-stream figure blocks */
 .lg-chips{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 10px}
 .lg-stream h4{margin:6px 0 2px;font-size:12.5px;font-weight:700;color:var(--text-2);display:flex;align-items:center;gap:7px}
@@ -602,6 +616,8 @@ input[type="range"]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px var
       <span class="cbar"></span>
       <span class="cip" id="cp-ip">-</span>
       <span class="ctag" id="cp-tag">…</span>
+      <span class="cbar" id="cp-usbbar" hidden></span>
+      <span class="cusb" id="cp-usb" hidden></span>
       <span class="chip crit" id="cp-faults" style="display:none;cursor:pointer" title="Latched device fault codes: click for details"></span>
     </div>
     <div class="hspacer"></div>
@@ -614,7 +630,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px var
     </button>
   </header>
   <nav class="app-nav" id="menu"></nav>
-  <main class="content"><div id="sleepbar" role="status" hidden></div><div class="page" id="view"><div class="loading"><div class="spinner"></div></div></div></main>
+  <main class="content"><div id="sleepbar" role="status" hidden></div><div id="nlbar" role="status" hidden></div><div class="page" id="view"><div class="loading"><div class="spinner"></div></div></div></main>
 </div>
 <div id="offline"><span class="d"></span><span id="offtx"></span></div>
 <div id="toasts"></div>
@@ -926,6 +942,43 @@ async function refreshSleep(){
   paintSleepWarn();paintSleepSoon();
 }
 setInterval(paintSleepSoon,1000);
+/* the dongle bar (2026-10-13): a dongle on the cable this browser has not met
+   yet, or one asking for attention (no GPS fix on USB Ethernet). Read from
+   the status the page polls anyway; dismissed per dongle, in this browser. */
+/* the header pill's USB segment (2026-10-13): what is on the connector and
+   its one-word state, from the status poll's `usb` summary */
+function paintUsbPill(){
+  const el=$("#cp-usb"),bar=$("#cp-usbbar");if(!el||!bar)return;
+  const s=(conn.status&&conn.status.usb)||null;
+  const kind=s&&s.kind;
+  const on=conn.state==="online"&&!!kind&&kind!=="none";
+  el.hidden=!on;bar.hidden=!on;if(!on)return;
+  const st=(t,c)=>h("span",{class:c||""},t);
+  let parts;
+  if(kind==="espnetlink")parts=[h("b",{},"ESPNetLink"),st(s.lte?"LTE":s.sim==="missing"?"no SIM":s.sim==="pin"?"SIM PIN":s.sim==="pin_wrong"?"PIN wrong":"connecting",s.lte?"ok":"warn"),st(s.gps_fix?"GPS fix":"no fix",s.gps_fix?"ok":"")];
+  else if(kind==="gps")parts=[h("b",{},"GPS"),st(s.fix?"fix"+(s.sats?", "+s.sats+" sats":""):"no fix",s.fix?"ok":"")];
+  else if(kind==="eth")parts=[h("b",{},"Ethernet adapter"),st(s.link&&s.ip?s.ip:"no link",s.link&&s.ip?"ok":"warn")];
+  else parts=[h("b",{},"unsupported device")];
+  el.replaceChildren("USB: ",...parts.flatMap((p,i)=>i?[" · ",p]:[p]));
+}
+const NL_SEEN="wican-nl-seen";
+function paintNlBar(){
+  const el=$("#nlbar");if(!el)return;
+  const u=(conn.status&&conn.status.usb)||null,s=(u&&u.kind==="espnetlink")?u:null;
+  let seen="";try{seen=localStorage.getItem(NL_SEEN)||"";}catch(_){}
+  const nudge=!!(s&&s.hint==="no_fix");
+  const fresh=!!(s&&s.device_id&&seen!==s.device_id);
+  const on=conn.state==="online"&&(fresh||nudge)&&!location.hash.startsWith("#/espnetlink")&&!location.hash.startsWith("#/setup");
+  el.hidden=!on;if(!on){el.dataset.kind="";return;}
+  const kind=nudge?"nudge":"fresh";
+  if(el.dataset.kind===kind)return;
+  el.dataset.kind=kind;el.classList.toggle("crit",nudge);
+  const dismiss=()=>{try{localStorage.setItem(NL_SEEN,s.device_id||"x");}catch(_){}el.dataset.kind="";el.hidden=true;};
+  if(nudge)el.replaceChildren(ic("alert"),h("span",{},h("b",{},"ESPNetLink: no GPS fix after "+Math.round((s.no_fix_s||0)/60)+" minutes on USB Ethernet."),h("span",{class:"sb-why"}," The cable can disturb the reception. WiFi modem gives the GPS its best reception; WiCAN restarts once.")),
+    h("button",{class:"btn sm pri sb-hold",onclick:()=>{location.hash="#/espnetlink";}},"Switch to WiFi modem"),h("a",{href:"#",onclick:e=>{e.preventDefault();dismiss();}},"Not now"));
+  else el.replaceChildren(ic("signal"),h("span",{},h("b",{},"ESPNetLink connected."),h("span",{class:"sb-why"}," "+[s.sim==="ready"?"SIM found":s.sim==="pin"?"SIM locked by a PIN":s.sim==="pin_wrong"?"the SIM refused the PIN":s.sim==="missing"?"no SIM":"",s.lte?(s.operator||"LTE")+" connected":"LTE connecting",s.gps_fix?"GPS fix":"GPS no fix yet"].filter(Boolean).join(", ")+".")),
+    h("button",{class:"btn sm pri sb-hold",onclick:()=>{location.hash="#/espnetlink";}},"Finish setup"),h("a",{href:"#",onclick:e=>{e.preventDefault();dismiss();}},"OK"));
+}
 function sleepAckModal(){return new Promise(res=>{
   const cb=h("input",{type:"checkbox"});
   const body=h("div",{},
@@ -1012,6 +1065,7 @@ function paintPill(){
   const b=st.bits||{};
   $("#cp-ip").textContent=w.ip||w.ap_ip||location.hostname;
   $("#cp-tag").textContent=conn.state!=="online"?(conn.state==="reboot"?"REBOOT":"OFFLINE"):(b.sta_connected?"STA":(w.ap_started||b.ap_enabled?"AP":"USB"));
+  paintUsbPill();
   /* check-engine: latched device fault codes (health net 2026-07-19) */
   const nf=st.health&&st.health.faults||0;const fe=$("#cp-faults");
   fe.style.display=nf>0?"":"none";if(nf>0)fe.textContent="⚠ "+nf+" fault"+(nf>1?"s":"");
@@ -1032,7 +1086,7 @@ function expectReboot(reason="Rebooting"){conn.rebootUntil=Date.now()+95000;setC
 async function ping(){
   try{const st=await api("/api/status");conn.status=st;
     conn.wifi=await tryGet("/api/wifi/status");
-    paintApWarn();
+    paintApWarn();paintNlBar();
     setConn("online");
     /* under the sleep voltage, or a countdown on the bar: keep it honest */
     if((st&&st.bits&&st.bits.wake_voltage_ok===false)||sleepSoon.cause!=="none")refreshSleep();
@@ -1182,7 +1236,7 @@ const LABELS={
   /* espnetlink */
   "espnetlink.mode":"Uplink mode",auto_pair:"Automatic pairing","espnetlink.ssid":"Dongle AP name","espnetlink.device_id":"Dongle device ID",
   "espnetlink.host":"Dongle address",gps_poll_s:"GPS poll interval (s)",health_poll_s:"Health poll interval (s)",cut_retries:"USB cut retries",
-  "espnetlink.apn":"APN","espnetlink.apn_user":"APN username","espnetlink.apn_password":"APN password",
+  "espnetlink.apn":"APN","espnetlink.apn_user":"APN username","espnetlink.apn_password":"APN password","espnetlink.sim_pin":"SIM PIN",
   /* usb_host_manager */
   role:"Connector role",device_class:"USB device class",ip_mode:"IP assignment",static_ip:"Static IP address",
   static_netmask:"Subnet mask",static_gw:"Gateway",prefer_usb_route:"Prefer USB uplink over WiFi",
@@ -1257,6 +1311,7 @@ const HELP={
   auto_pair:"Read the dongle's AP key over USB automatically the first time it is plugged in.",
   cut_retries:"How many times to retry cutting the dongle's USB data lines before giving up.",
   "espnetlink.apn":"Only if your carrier gave you one: most SIMs work without it. WiCAN sends it to the dongle the next time the dongle is on the cable; the dongle restarts once to apply it. Blank keeps the dongle's own.",
+  "espnetlink.sim_pin":"Only when the dongle reports the SIM as PIN locked. Sent to the dongle once per start while the SIM asks; a PIN the SIM refuses is never retried by itself (three wrong tries lock the SIM). Blank = none.",
   role:"Host: an adapter or dongle plugs into the WiCAN. Device: the WiCAN appears as a network adapter on a PC.",
   prefer_usb_route:"Use the USB-Ethernet uplink even when WiFi is connected.",
   "vpn_manager.type":"WireGuard: point-to-point tunnel to your own server. Tailscale: zero-config mesh (needs an auth key).",
@@ -1643,7 +1698,7 @@ async function route(){
       actions:[{label:"Stay",fn:()=>res(true)},{label:"Discard",kind:"danger",fn:()=>{store.pending.clear();store.dirty.clear();renderSubmit();res(false);}},{label:"Submit",kind:"pri",fn:()=>{store.apply();res(true);}}]}));
     if(stay){location.hash="#/"+curSection;return;}
   }
-  curSection=section;
+  curSection=section;paintNlBar();
   buildMenu(section,sub);
   if(cleanup){try{cleanup();}catch{}cleanup=null;}
   subNav=null;
@@ -2431,8 +2486,14 @@ PAGES.automate=async(view,sub)=>{
       if(d.type==="mqtt"){
         rows.push(frow("Retained",switchCtl(d.retain!==false,v=>{d.retain=v;stageIt();},{sm:true}),"A retained message gives a new subscriber the last snapshot at once."));
       }else if(d.type==="abrp"){
-        rows.push(frow("ABRP user token",secretInput(d,"auth_token",l.has_token,"from the ABRP app: Settings → Live data → Generic"),"Required. Identifies your car in A Better Routeplanner."));
-        rows.push(frow("ABRP API key",secretInput(d,"api_key",l.has_api_key,"the Iternio developer api_key"),"Sent as the api_key query parameter, or as an Authorization: APIKEY header below."));
+        rows.push(frow("ABRP user token",secretInput(d,"auth_token",l.has_token,"from the ABRP app: the vehicle's live data setup, Generic"),"Required. Identifies your car in A Better Routeplanner: the token shown by the Generic option of the vehicle's live data setup."));
+        rows.push(frow("ABRP API key",secretInput(d,"api_key",l.has_api_key,"your Iternio Telemetry API key"),"Your own key from Iternio (free for telemetry, contact@iternio.com); it identifies the application and allows 2 requests per second. Sent as the api_key query parameter, or as an Authorization: APIKEY header below."));
+        const cov=h("div",{class:"help","data-abrp-coverage":d.name},"Checking which ABRP fields this vehicle provides…");
+        tryGet("/api/destinations/abrp").then(c=>{if(!c)return cov.replaceChildren("ABRP fields: unknown (the device did not answer).");
+          const miss=c.missing||[];const pres=(c.present||[]).filter(k=>k!=="utc");
+          cov.replaceChildren("ABRP receives now: "+(pres.length?pres.join(", "):"only the time")+". ",
+            miss.length?h("span",{},h("b",{},"Missing for route planning: "),miss.map(m=>m.field+" (name a parameter "+m.parameter+")").join(", "),". Values pass through unchanged, in ABRP's units."):h("b",{},"All of ABRP's main fields are provided."));});
+        rows.push(frow("ABRP fields",cov,"ABRP rows send every 5 s at least and this device starts ABRP requests at least 2.5 s apart, the Test button included (Iternio's limit is 2 per second per key)."));
         rows.push(frow("API key placement",sel(ABRP_AUTHS,d.auth==="api_key_header"?"api_key_header":"api_key_query",v=>{d.auth=v;d.auth_name="";stageIt();})));
         rows.push(frow("Car model",h("input",{value:d.car_model||"",placeholder:"e.g. hyundai:ioniq5:22:77",oninput:e=>{d.car_model=e.target.value;stageIt();}}),"ABRP's car_model id (optional). Sent in every telemetry record."));
         rows.push(frow("Certificate set",sel([["","Built-in CA bundle"],...certSets.map(n=>[n,n])],d.cert_set||"",v=>{d.cert_set=v;stageIt();}),"Only for a private ABRP-compatible endpoint; api.iternio.com uses the built-in bundle."));
@@ -2480,9 +2541,9 @@ PAGES.automate=async(view,sub)=>{
             const row=h("div",{style:GRID+";padding:6px;border-top:1px solid var(--border)"},
               switchCtl(d.enabled!==false,v=>{d.enabled=v;stageIt();},{sm:true,noText:true,title:"Pause this destination without deleting it"}),
               sel(TYPES,d.type||"mqtt",v=>{d.type=v;if(v==="mqtt"&&!/^~\//.test(d.url||"")&&!(d.url||"").includes("/"))d.url="~/autopid";
-                if(v!=="mqtt"&&/^~\//.test(d.url||""))d.url="";if(v==="abrp"&&(d.auth||"none")==="none")d.auth="api_key_query";if(v!=="abrp"&&d.auth==="api_key_query"&&!d.auth_token)d.auth="none";stageIt();rebuild();}),
+                if(v!=="mqtt"&&/^~\//.test(d.url||""))d.url="";if(v==="abrp"&&(d.auth||"none")==="none")d.auth="api_key_query";if(v==="abrp"&&(d.period_s||5)<5)d.period_s=5;if(v!=="abrp"&&d.auth==="api_key_query"&&!d.auth_token)d.auth="none";stageIt();rebuild();}),
               h("input",{class:"mono","data-dest-url":d.name,value:d.url||"",placeholder:PH[d.type]||"",title:d.type==="abrp"?"Leave empty for Iternio's endpoint":"",oninput:e=>{d.url=e.target.value;stageIt();}}),
-              h("input",{class:"mono",type:"number",min:1,max:86400,value:d.period_s||5,title:"Publish period in seconds (minimum 1)",onchange:e=>{d.period_s=Math.min(86400,Math.max(1,Math.round(Number(e.target.value)||1)));e.target.value=d.period_s;stageIt();}}),
+              h("input",{class:"mono",type:"number",min:d.type==="abrp"?5:1,max:86400,value:d.period_s||5,title:d.type==="abrp"?"Publish period in seconds (ABRP: 5 at least, Iternio takes one point per 5 s)":"Publish period in seconds (minimum 1)",onchange:e=>{const lo=d.type==="abrp"?5:1;d.period_s=Math.min(86400,Math.max(lo,Math.round(Number(e.target.value)||lo)));e.target.value=d.period_s;stageIt();}}),
               h("div",{"data-dest-status":d.name},statusChip(d)),
               h("div",{class:"rowflex",style:"gap:4px;justify-content:flex-end"},caret,testBtn,
                 h("button",{class:"btn sm gh danger",title:"Remove destination",onclick:()=>{dv.destinations=dv.destinations.filter(x=>x!==d);expanded.delete(d.name);stageIt();rebuild();}},ic("trash"))));
@@ -2524,7 +2585,7 @@ PAGES.automate=async(view,sub)=>{
         h("div",{class:"help"},"Master switch. Each row below has its own switch.")),
       h("div",{class:"frow"},h("label",{},"Links"),h("div",{class:"ctl"},linkEl)),
       legacyEl,listEl,
-      note("","Each destination sends the live parameter set on its own cycle. MQTT: a topic, ~ expands to this device's base topic. HTTP and HTTPS: a JSON POST with optional authentication, extra query parameters and, for HTTPS, a certificate set from System → Certificates. ABRP: telemetry for A Better Routeplanner (the user token from the ABRP app plus an Iternio API key). A failing endpoint is retried with a growing interval; a lost network only pauses the sends. Changes apply after a restart; Test uses the table the device is running.")));
+      note("","Each destination sends the live parameter set on its own cycle. MQTT: a topic, ~ expands to this device's base topic. HTTP and HTTPS: a JSON POST with optional authentication, extra query parameters and, for HTTPS, a certificate set from System → Certificates. ABRP: telemetry for A Better Routeplanner (the user token from the ABRP app plus your own Iternio API key; 5 s at least, requests at least 2.5 s apart; the vehicle's parameters reach ABRP by name: SOC, HV_W, SPEED, CHARGING, the row's options list what is missing). A failing endpoint is retried with a growing interval; a lost network only pauses the sends. Changes apply after a restart; Test uses the table the device is running.")));
   }catch(e){paneDest.append(banner("crit","alert","Destinations: "+e.message));}
   /* 4. parameters: the big editor card gets its own tab */
   const paramsCard=h("div",{});paneParams.append(paramsCard);
@@ -4173,7 +4234,8 @@ PAGES.usb=async(view,sub)=>{
   }
   paneStatus.append(gpsCard);
   paneStatus.append(cardTools("ESPNetLink","signal",
-    [h("button",{class:"btn sm",onclick:repair,title:"VBUS cycle: the dongle re-enumerates and its AP key is read again"},ic("refresh"),"Re-pair")],
+    [h("button",{class:"btn sm pri",onclick:()=>{location.hash="#/espnetlink";},title:"The dongle screen: what is on the cable, the carrier settings, the GPS choice"},ic("sparkles"),"Set up"),
+     h("button",{class:"btn sm",onclick:repair,title:"VBUS cycle: the dongle re-enumerates and its AP key is read again"},ic("refresh"),"Re-pair")],
     nlKv,
     note("","USB Ethernet (RNDIS, the default): the data lines stay on and the dongle is a USB-Ethernet uplink presenting the selected class; a dongle fresh from the box already matches, otherwise the WiCAN switches its USB class and LTE sharing and the dongle reboots once. WiFi modem: the WiCAN reads the dongle's AP key over USB, cuts the data lines (the USB host desenses the dongle's GPS) and joins the dongle's Wi-Fi AP for internet (LTE) and GPS; the dongle boots with USB on every time, so this repeats at every dongle boot and a forgotten dongle password never locks anyone out."),
     manual));
@@ -4182,7 +4244,7 @@ PAGES.usb=async(view,sub)=>{
   try{
     const nlRows=await settingsForm("espnetlink",null,{visible:st=>{
       if(!st.enabled)return["enabled"];
-      const base=["enabled","mode","auto_pair","ssid","host","apn","apn_user","apn_password","gps_poll_s","health_poll_s","cli"];
+      const base=["enabled","mode","auto_pair","ssid","host","apn","apn_user","apn_password","sim_pin","gps_poll_s","health_poll_s","cli"];
       return st.mode==="wifi_modem"?[...base,"cut_retries"]:base;
     }});
     paneSettings.append(card("ESPNetLink Settings","settings",...nlRows));
@@ -4998,6 +5060,12 @@ PAGES.setup=async(view,sub)=>{
   if(!PAGES.__setup)await loadScript("/ui/setup.js");
   if(!PAGES.__setup){const p=page(view,null,"Quick Setup","First-run setup wizard");p.append(banner("crit","alert","Quick Setup could not be loaded (/ui/setup.js). Reload the page, or update the firmware."));return null;}
   return PAGES.__setup(view,sub);
+};
+/* ---- the ESPNetLink screen (2026-10-13): the wizard's USB step on its own ---- */
+PAGES.espnetlink=async(view)=>{
+  if(!PAGES.__setup)await loadScript("/ui/setup.js");
+  if(!PAGES.__espnetlink){const p=page(view,null,"ESPNetLink","The dongle on the USB connector");p.append(banner("crit","alert","This screen could not be loaded (/ui/setup.js). Reload the page, or update the firmware."));return null;}
+  return PAGES.__espnetlink(view);
 };
 
 PAGES.scripts=async(view,sub)=>{
