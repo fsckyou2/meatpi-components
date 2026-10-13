@@ -7,6 +7,7 @@
 #include "unity.h"
 
 #include "dev_status_manager_private.h"
+#include "dev_status_usb.h"
 
 void test_bit_names_map_known_bits(void)
 {
@@ -60,4 +61,15 @@ void test_uptime_truncation_and_errors(void)
     /* too small: NUL-terminated truncation, reports stored length */
     TEST_ASSERT_EQUAL(4, dsm_format_uptime(0, buf, sizeof(buf)));
     TEST_ASSERT_EQUAL_STRING("00:0", buf);
+}
+
+/* 2026-10-13: the USB connector summary's kind, as GET /api/status spells it */
+void test_usb_kind_spellings(void)
+{
+    TEST_ASSERT_EQUAL_STRING("none", dev_status_manager_usb_kind_str(DEV_STATUS_USB_NONE));
+    TEST_ASSERT_EQUAL_STRING("espnetlink", dev_status_manager_usb_kind_str(DEV_STATUS_USB_ESPNETLINK));
+    TEST_ASSERT_EQUAL_STRING("gps", dev_status_manager_usb_kind_str(DEV_STATUS_USB_GPS));
+    TEST_ASSERT_EQUAL_STRING("eth", dev_status_manager_usb_kind_str(DEV_STATUS_USB_ETH));
+    TEST_ASSERT_EQUAL_STRING("other", dev_status_manager_usb_kind_str(DEV_STATUS_USB_OTHER));
+    TEST_ASSERT_EQUAL_STRING("none", dev_status_manager_usb_kind_str((dev_status_usb_kind_t)99));
 }

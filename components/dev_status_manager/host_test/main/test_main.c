@@ -9,6 +9,7 @@ void test_bit_names_unknown(void);
 void test_uptime_formats_hms(void);
 void test_uptime_formats_days(void);
 void test_uptime_truncation_and_errors(void);
+void test_usb_kind_spellings(void);
 
 void app_main(void)
 {
@@ -18,5 +19,6 @@ void app_main(void)
     RUN_TEST(test_uptime_formats_hms);
     RUN_TEST(test_uptime_formats_days);
     RUN_TEST(test_uptime_truncation_and_errors);
+    RUN_TEST(test_usb_kind_spellings);
     UNITY_END();
 }

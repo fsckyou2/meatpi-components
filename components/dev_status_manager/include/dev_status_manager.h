@@ -42,6 +42,7 @@
 
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
+#include "dev_status_usb.h"
 #include "freertos/event_groups.h"
 
 #ifdef __cplusplus
@@ -287,6 +288,21 @@ esp_err_t dev_status_manager_task_stats(dev_status_task_t *out, size_t cap,
 /** Die temperature in °C (ESP32-S3 internal sensor; installed lazily on
  *  first call, -10..80 °C measurement range). */
 esp_err_t dev_status_manager_temperature(float *out_c);
+
+/* ---- the USB connector summary (2026-10-13) ------------------------------- */
+
+/* The types and the kind's spelling: dev_status_usb.h (pure). What is on
+ * the USB connector and its one-line state, for the header pill and the
+ * ESPNetLink bar of the web UI on the status poll they make anyway (`usb`
+ * on GET /api/status). The composition root provides it: it knows the USB
+ * components, this manager must not. */
+
+/** The one provider (main's), asked per status request; NULL = no `usb`. */
+void dev_status_manager_set_usb_provider(dev_status_usb_provider_t fn);
+
+/** The summary now: false when there is no provider or nothing is on the
+ *  connector (@p out zeroed, kind NONE). */
+bool dev_status_manager_usb(dev_status_usb_t *out);
 
 #ifdef __cplusplus
 }

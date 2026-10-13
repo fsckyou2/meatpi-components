@@ -611,3 +611,30 @@ const char *dev_status_manager_device_id(void)
 
     return s_id;
 }
+
+/* ---- the USB connector summary (2026-10-13) -------------------------------- */
+
+static dev_status_usb_provider_t s_usb_provider;
+
+void dev_status_manager_set_usb_provider(dev_status_usb_provider_t fn)
+{
+    s_usb_provider = fn;
+}
+
+bool dev_status_manager_usb(dev_status_usb_t *out)
+{
+    if (out == NULL)
+    {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    if (s_usb_provider == NULL)
+    {
+        return false;
+    }
+    if (!s_usb_provider(out))
+    {
+        return false;
+    }
+    return out->kind != DEV_STATUS_USB_NONE;
+}

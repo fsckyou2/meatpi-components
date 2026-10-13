@@ -30,6 +30,8 @@
 #include <stdio.h>
 #include <stddef.h>
 
+#include "dev_status_usb.h"
+
 #ifndef BIT0 /* host build: no freertos header */
 #define DSM_BIT(n) (1u << (n))
 #else
@@ -120,4 +122,18 @@ size_t dsm_format_uptime(uint64_t uptime_us, char *buf, size_t buf_len)
     }
 
     return (size_t)written;
+}
+
+/* ---- the USB connector summary (2026-10-13): the kind's wire spelling ---- */
+
+const char *dev_status_manager_usb_kind_str(dev_status_usb_kind_t k)
+{
+    switch (k)
+    {
+        case DEV_STATUS_USB_ESPNETLINK: return "espnetlink";
+        case DEV_STATUS_USB_GPS:        return "gps";
+        case DEV_STATUS_USB_ETH:        return "eth";
+        case DEV_STATUS_USB_OTHER:      return "other";
+        default:                        return "none";
+    }
 }

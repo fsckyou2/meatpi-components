@@ -70,6 +70,27 @@ image identity, and reboot counters (the latter come from `restart_tracker`).
   dashboard.
 - **`temp_c`** (added 2026-07-08): die temperature in °C (ESP32-S3
   internal sensor, 0.1 ° resolution; omitted if the sensor errors).
+- **`usb`** (added 2026-10-13): what is on the USB connector, for the
+  header pill and the ESPNetLink bar, on the poll the page makes anyway;
+  absent while nothing is enumerated. `kind` is `espnetlink`, `gps`, `eth`
+  or `other`, then per kind:
+
+```json
+"usb": {"kind":"espnetlink","device_id":"206ef1894a5d","sim":"ready",
+        "lte":true,"operator":"Telstra","gps_fix":false,"satellites":0,
+        "no_fix_s":0,"hint":""}
+"usb": {"kind":"gps","fix":true,"satellites":9,"product":"u-blox 7 - GPS/GNSS Receiver"}
+"usb": {"kind":"eth","link":true,"ip":"10.42.2.37","product":"AX88772B"}
+"usb": {"kind":"other","product":"SanDisk Ultra"}
+```
+
+  `sim` is the dongle's SIM as its bring-up found it (`ready`, `missing`,
+  `pin`, `pin_wrong`, `unknown`, or "" before any reading), `hint` is
+  `no_fix` once the WiCAN has been away on the wire with LTE up and no fix
+  for 600 s (`espnetlink_link`'s GPS hint: the page nudges toward WiFi
+  modem). The composition root provides the object
+  (`dev_status_manager_set_usb_provider`); the kind follows the wizard's
+  own rule for what is on the connector.
 
 ## GET /api/info
 
