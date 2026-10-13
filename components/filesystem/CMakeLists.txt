@@ -1,5 +1,6 @@
 ﻿idf_component_register(
     SRCS "filesystem.c"
+         "filesystem_read.c"
          "filesystem_settings.c"
          "filesystem_stream.c"
          "filesystem_path.c"

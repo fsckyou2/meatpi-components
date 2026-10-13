@@ -22,16 +22,23 @@
 
 /**
  * @file filesystem.c
- * @brief Lifecycle and file operations for the WiCAN filesystem component.
+ * @brief Lifecycle and the writing operations of the WiCAN filesystem
+ *        component; the reading operations live in filesystem_read.c
+ *        (split 2026-10-13, the standard's 700-line rule).
  *
  * Owns the internal-flash LittleFS mount (/data). The /sd backend is
  * reserved for external_storage and reports ESP_ERR_INVALID_STATE until
  * that component exists and wires it up. Settings live in
  * filesystem_settings.c (standard §4.1).
+ *
+ * The stack rule (2026-10-13): every /data operation reads or writes the
+ * flash with the cache off, which a task on a PSRAM stack cannot survive
+ * (standard §2). An operation called from such a task runs on the stream
+ * writer's internal stack instead (fs_run_internal, filesystem_stream.c),
+ * synchronously, so callers no longer have to know.
  */
 #include "filesystem.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -40,7 +47,6 @@
 #include "esp_attr.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
-#include "esp_vfs_fat.h" /* /sd capacity (backend mounted by external_storage) */
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "sdkconfig.h"
@@ -260,11 +266,29 @@ esp_err_t filesystem_sd_set_mounted(bool mounted)
     return ESP_OK;
 }
 
-/* ---- operations ---------------------------------------------------------- */
+/* ---- the writing operations ------------------------------------------------
+   Each one starts with the stack rule: a /data operation from a PSRAM
+   stack is handed to the writer task (the job re-enters the same function
+   there, where the rule passes). */
+
+typedef struct
+{
+    const char *path;
+    const void *data;
+    size_t      len;
+} write_args_t;
+
+static esp_err_t write_job(void *p)
+{
+    write_args_t *a = p;
+
+    return filesystem_write(a->path, a->data, a->len);
+}
 
 esp_err_t filesystem_write(const char *path, const void *data, size_t len)
 {
-    esp_err_t err = check_path(path, NULL);
+    fs_backend_t backend;
+    esp_err_t    err = check_path(path, &backend);
 
     if (err != ESP_OK)
     {
@@ -274,6 +298,13 @@ esp_err_t filesystem_write(const char *path, const void *data, size_t len)
     if (data == NULL && len > 0)
     {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (backend == FS_BACKEND_INTERNAL && !fs_on_internal_stack())
+    {
+        write_args_t a = { path, data, len };
+
+        return fs_run_internal(write_job, &a);
     }
 
     char tmp[FS_PATH_MAX];
@@ -353,7 +384,69 @@ esp_err_t filesystem_write(const char *path, const void *data, size_t len)
     return ESP_OK;
 }
 
-/* ---- internals shared with filesystem_stream.c ------------------------------- */
+static esp_err_t delete_job(void *p)
+{
+    return filesystem_delete(p);
+}
+
+esp_err_t filesystem_delete(const char *path)
+{
+    fs_backend_t backend;
+    esp_err_t    err = check_path(path, &backend);
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    if (backend == FS_BACKEND_INTERNAL && !fs_on_internal_stack())
+    {
+        return fs_run_internal(delete_job, (void *)path);
+    }
+
+    FS_LOCK();
+
+    struct stat st;
+
+    if (stat(path, &st) != 0)
+    {
+        FS_UNLOCK();
+        return errno_to_esp(errno);
+    }
+
+    int rc = S_ISDIR(st.st_mode) ? rmdir(path) : unlink(path);
+
+    FS_UNLOCK();
+    return (rc == 0) ? ESP_OK : errno_to_esp(errno);
+}
+
+static esp_err_t mkdirs_job(void *p)
+{
+    return filesystem_mkdirs(p);
+}
+
+esp_err_t filesystem_mkdirs(const char *dir_path)
+{
+    fs_backend_t backend;
+    esp_err_t    err = check_path(dir_path, &backend);
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    if (backend == FS_BACKEND_INTERNAL && !fs_on_internal_stack())
+    {
+        return fs_run_internal(mkdirs_job, (void *)dir_path);
+    }
+
+    FS_LOCK();
+    err = mkdirs_locked(dir_path);
+    FS_UNLOCK();
+    return err;
+}
+
+/* ---- internals shared with filesystem_read.c and filesystem_stream.c ------- */
 
 esp_err_t fs_check_path(const char *path, fs_backend_t *out_backend)
 {
@@ -409,295 +502,4 @@ int fs_rename_replace(const char *tmp, const char *path)
 esp_err_t fs_errno_to_esp(int err)
 {
     return errno_to_esp(err);
-}
-
-esp_err_t filesystem_read(const char *path, void *buf, size_t buf_len,
-                          size_t *out_len)
-{
-    esp_err_t err = check_path(path, NULL);
-
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-
-    if (buf == NULL && buf_len > 0)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    FS_LOCK();
-
-    FILE *f = fopen(path, "rb");
-
-    if (f == NULL)
-    {
-        FS_UNLOCK();
-        return errno_to_esp(errno);
-    }
-
-    struct stat st;
-
-    if (fstat(fileno(f), &st) != 0)
-    {
-        fclose(f);
-        FS_UNLOCK();
-        return ESP_FAIL;
-    }
-
-    size_t size = (size_t)st.st_size;
-
-    if (out_len != NULL)
-    {
-        *out_len = size;
-    }
-
-    if (size > buf_len)
-    {
-        fclose(f);
-        FS_UNLOCK();
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    uint8_t *dst = buf;
-    size_t   left = size;
-
-    while (left > 0)
-    {
-        size_t chunk = (left > sizeof(s_scratch)) ? sizeof(s_scratch) : left;
-
-        if (fread(s_scratch, 1, chunk, f) != chunk)
-        {
-            fclose(f);
-            FS_UNLOCK();
-            return ESP_FAIL;
-        }
-
-        memcpy(dst, s_scratch, chunk); /* internal -> caller (maybe PSRAM) */
-        dst += chunk;
-        left -= chunk;
-    }
-
-    fclose(f);
-    FS_UNLOCK();
-    return ESP_OK;
-}
-
-esp_err_t filesystem_size(const char *path, size_t *out_size)
-{
-    esp_err_t err = check_path(path, NULL);
-
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-
-    if (out_size == NULL)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    FS_LOCK();
-
-    struct stat st;
-    int rc = stat(path, &st);
-
-    FS_UNLOCK();
-
-    if (rc != 0)
-    {
-        return errno_to_esp(errno);
-    }
-
-    *out_size = (size_t)st.st_size;
-    return ESP_OK;
-}
-
-bool filesystem_exists(const char *path)
-{
-    if (check_path(path, NULL) != ESP_OK)
-    {
-        return false;
-    }
-
-    FS_LOCK();
-
-    struct stat st;
-    int rc = stat(path, &st);
-
-    FS_UNLOCK();
-    return rc == 0;
-}
-
-esp_err_t filesystem_delete(const char *path)
-{
-    esp_err_t err = check_path(path, NULL);
-
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-
-    FS_LOCK();
-
-    struct stat st;
-
-    if (stat(path, &st) != 0)
-    {
-        FS_UNLOCK();
-        return errno_to_esp(errno);
-    }
-
-    int rc = S_ISDIR(st.st_mode) ? rmdir(path) : unlink(path);
-
-    FS_UNLOCK();
-    return (rc == 0) ? ESP_OK : errno_to_esp(errno);
-}
-
-esp_err_t filesystem_mkdirs(const char *dir_path)
-{
-    esp_err_t err = check_path(dir_path, NULL);
-
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-
-    FS_LOCK();
-    err = mkdirs_locked(dir_path);
-    FS_UNLOCK();
-    return err;
-}
-
-esp_err_t filesystem_list(const char *dir_path, filesystem_list_cb_t cb,
-                          void *ctx)
-{
-    esp_err_t err = check_path(dir_path, NULL);
-
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-
-    if (cb == NULL)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    FS_LOCK();
-
-    DIR *dir = opendir(dir_path);
-
-    if (dir == NULL)
-    {
-        FS_UNLOCK();
-        return errno_to_esp(errno);
-    }
-
-    struct dirent *ent;
-
-    err = ESP_OK;
-
-    while ((ent = readdir(dir)) != NULL)
-    {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
-        {
-            continue;
-        }
-
-        char full[FS_PATH_MAX];
-
-        if (snprintf(full, sizeof(full), "%s/%s", dir_path, ent->d_name)
-            >= (int)sizeof(full))
-        {
-            continue; /* name doesn't fit our namespace; skip, don't fail */
-        }
-
-        struct stat st;
-        bool   is_dir = false;
-        size_t size = 0;
-
-        if (stat(full, &st) == 0)
-        {
-            is_dir = S_ISDIR(st.st_mode);
-            size = is_dir ? 0 : (size_t)st.st_size;
-        }
-
-        err = cb(ent->d_name, is_dir, size, ctx);
-
-        if (err != ESP_OK)
-        {
-            break;
-        }
-    }
-
-    closedir(dir);
-    FS_UNLOCK();
-    return err;
-}
-
-FILE *filesystem_open(const char *path, const char *mode)
-{
-    if (mode == NULL || check_path(path, NULL) != ESP_OK)
-    {
-        return NULL;
-    }
-
-    return fopen(path, mode);
-}
-
-esp_err_t filesystem_info(const char *prefix, uint64_t *out_total,
-                          uint64_t *out_used)
-{
-    fs_backend_t backend;
-    esp_err_t    err = check_path(prefix, &backend);
-
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-
-    uint64_t total = 0;
-    uint64_t used = 0;
-
-    if (backend == FS_BACKEND_INTERNAL)
-    {
-        size_t lfs_total = 0;
-        size_t lfs_used = 0;
-
-        err = esp_littlefs_info(CONFIG_FILESYSTEM_PARTITION_LABEL,
-                                &lfs_total, &lfs_used);
-        total = lfs_total;
-        used = lfs_used;
-    }
-    else
-    {
-        /* /sd: FATFS free-cluster query through the VFS mount, kept 64-bit
-           all the way: the size_t cast that stood here wrapped a 32 GB card
-           to 976 MB and the bench's 16 GB card to 2.83 GB (issue #982,
-           2026-10-11) */
-        uint64_t fat_total = 0;
-        uint64_t fat_free = 0;
-
-        err = esp_vfs_fat_info(FS_PREFIX_SD, &fat_total, &fat_free);
-        total = fat_total;
-        used = fat_total - fat_free;
-    }
-
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-
-    if (out_total != NULL)
-    {
-        *out_total = total;
-    }
-
-    if (out_used != NULL)
-    {
-        *out_used = used;
-    }
-
-    return ESP_OK;
 }

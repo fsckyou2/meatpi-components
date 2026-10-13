@@ -140,6 +140,17 @@ int fs_rename_replace(const char *tmp, const char *path);
 /** Start the async-pipe writer service (called by filesystem_init). */
 esp_err_t fs_stream_service_init(void);
 
+/* ---- the internal-stack service (filesystem_stream.c, 2026-10-13) ------------
+   Every /data operation reads or writes the flash with the cache off, which
+   a task on a PSRAM stack cannot survive (standard §2). A public operation
+   that finds itself on such a stack hands the call to the stream writer's
+   internal stack through fs_run_internal: synchronous, one job at a time,
+   the caller's buffers wherever they are. The job calls the same public
+   function again on the writer task, where the check passes. */
+typedef esp_err_t (*fs_job_fn_t)(void *arg);
+bool      fs_on_internal_stack(void);  /* the current task's stack is DRAM */
+esp_err_t fs_run_internal(fs_job_fn_t fn, void *arg);
+
 #ifdef __cplusplus
 }
 #endif

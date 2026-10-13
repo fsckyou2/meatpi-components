@@ -77,17 +77,34 @@ exists.
   caller-owned stdio streams outside that serialization.
 - All file data bounces through a 2 KiB **internal-RAM** scratch buffer
   (`// internal: cache-off during FS write`), so caller buffers may live in PSRAM.
-- Standard §2 corollary still applies to callers: no `filesystem_write()` from a
-  task with a PSRAM stack.
+- **The stack rule is the component's job since 2026-10-13.** Every `/data`
+  operation (reads included: a LittleFS read goes through `esp_partition_read`,
+  which disables the flash cache too) needs a task stack in internal RAM. An
+  operation called from a task whose stack is in PSRAM is run on the
+  component's own internal-stack writer task (`fs_writer`, the async pipe's
+  task) instead: synchronous, one job at a time, the caller waits
+  (`fs_run_internal` in `filesystem_stream.c`; the public function notices
+  the PSRAM stack with `esp_ptr_internal` on a local and re-enters itself on
+  the writer task). A `filesystem_list()` callback then runs on that task's
+  5 KB stack: keep callbacks small. `/sd` operations never touch the flash
+  cache and run on the caller's stack. The exception is `filesystem_open()`:
+  its stream is the caller's, so a `/data` stream must be used from an
+  internal-stack task. This is what let `config_backup`'s copies worker move
+  its 8 KB stack to PSRAM.
+- Files: `filesystem.c` (lifecycle, write, delete, mkdirs, the shared
+  internals), `filesystem_read.c` (read, size, exists, list, open, info),
+  `filesystem_stream.c` (the atomic streams, the async pipe, the writer task
+  and the internal-stack job service), `filesystem_path.c` (PURE), 
+  `filesystem_mount.c`, `filesystem_settings.c`, `filesystem_cli.c`.
 
 ## Memory footprint (estimated: replace with measured before release)
 
 | Where | What | Size |
 |---|---|---|
-| Internal `.bss` | scratch buffer + mutex | ~2.2 KiB |
+| Internal `.bss` | scratch buffer + mutex + the job mailbox's two semaphores | ~2.4 KiB |
 | PSRAM `.bss` | state struct | < 32 B |
-| Heap (internal) | LittleFS mount (esp_littlefs caches) | ~4–8 KiB while mounted |
-| Task stacks | none (runs in caller context) | 0 |
+| Heap (internal) | LittleFS mount (esp_littlefs caches) | ~4 to 8 KiB while mounted |
+| Task stacks | `fs_writer` 5 KB internal (the async pipe and the marshalled `/data` jobs of PSRAM-stack callers; 4 KB until 2026-10-13, the probe read 1.3 KB headroom under config_backup's sweeps); everything else runs in the caller's context | 5 KiB |
 
 ## First boot, and a partition that is not ours
 

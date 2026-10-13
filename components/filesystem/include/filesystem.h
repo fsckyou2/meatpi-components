@@ -48,13 +48,16 @@
  *
  * Memory (Coding Standard §2, ARCHITECTURE §12): read/write data is bounced
  * through an internal-RAM scratch buffer (cache-off during flash ops), so
- * caller buffers may live in PSRAM. Do not call ANY operation here
- * (reads included) from a task whose stack is in PSRAM: littlefs reads go
- * through esp_partition_read, which also disables the flash cache
- * (asserts in spi_flash_disable_interrupts_caches_and_other_cpu;
- * bench-proven 2026-07-07 via the event dispatcher). Marshal to an
- * internal-stack context instead (async writer for writes; a one-shot
- * loader task like script_engine's for reads).
+ * caller buffers may live in PSRAM. Every /data operation (reads included:
+ * littlefs reads go through esp_partition_read, which disables the flash
+ * cache too, bench-proven 2026-07-07 via the event dispatcher) needs a task
+ * stack in internal RAM. Since 2026-10-13 the component takes care of that
+ * itself: an operation called from a task whose stack is in PSRAM runs on
+ * the component's own internal-stack writer task, synchronously, one at a
+ * time (the caller waits; a filesystem_list() callback then runs on that
+ * task's 5 KB stack, so keep callbacks small). The one exception is
+ * filesystem_open(): its stream is the caller's, so a /data stream must be
+ * used from an internal-stack task.
  */
 #pragma once
 
