@@ -101,6 +101,50 @@ static esp_err_t status_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(resp, "boot_count", boot_count);
     cJSON_AddNumberToObject(resp, "unexpected_resets", unexpected);
 
+    /* the USB connector summary (2026-10-13): what is on the connector and
+       its one-line state, for the header pill and the ESPNetLink bar;
+       absent while nothing is enumerated */
+    dev_status_usb_t usb;
+
+    if (dev_status_manager_usb(&usb))
+    {
+        cJSON *u = cJSON_AddObjectToObject(resp, "usb");
+
+        if (u != NULL)
+        {
+            cJSON_AddStringToObject(u, "kind",
+                                    dev_status_manager_usb_kind_str(usb.kind));
+            if (usb.kind == DEV_STATUS_USB_ESPNETLINK)
+            {
+                cJSON_AddStringToObject(u, "device_id", usb.device_id);
+                cJSON_AddStringToObject(u, "sim", usb.sim);
+                cJSON_AddBoolToObject(u, "lte", usb.lte);
+                cJSON_AddStringToObject(u, "operator", usb.operator_name);
+                cJSON_AddBoolToObject(u, "gps_fix", usb.fix);
+                cJSON_AddNumberToObject(u, "satellites", usb.satellites);
+                cJSON_AddNumberToObject(u, "no_fix_s", usb.no_fix_s);
+                cJSON_AddStringToObject(u, "hint",
+                                        usb.no_fix_hint ? "no_fix" : "");
+            }
+            else if (usb.kind == DEV_STATUS_USB_GPS)
+            {
+                cJSON_AddBoolToObject(u, "fix", usb.fix);
+                cJSON_AddNumberToObject(u, "satellites", usb.satellites);
+                cJSON_AddStringToObject(u, "product", usb.product);
+            }
+            else if (usb.kind == DEV_STATUS_USB_ETH)
+            {
+                cJSON_AddBoolToObject(u, "link", usb.link);
+                cJSON_AddStringToObject(u, "ip", usb.ip);
+                cJSON_AddStringToObject(u, "product", usb.product);
+            }
+            else
+            {
+                cJSON_AddStringToObject(u, "product", usb.product);
+            }
+        }
+    }
+
     /* memory health (Architecture §12b): internal is the scarce heap;
        largest_block vs free is THE fragmentation signal. This route is
        polled (the web UI: every 3 s), so the PSRAM heap is not walked for
