@@ -6,7 +6,9 @@
  *        filter parser, and the record/row encoders for every
  *        non-sqlite engine (.wdl, csv, candump, asc, jsonl rows +
  *        MDF4 prelude/record + BLF builders: byte-level golden
- *        vectors). Expected: 20 Tests 0 Failures 0 Ignored.
+ *        vectors); the recovery decisions (test_recover.c) and the
+ *        clock rules (test_clock.c). Expected: 40 Tests 0 Failures
+ *        0 Ignored.
  */
 #include <string.h>
 
@@ -23,6 +25,20 @@ void test_corrupt_names_round_trip(void);
 void test_record_sanity(void);
 void test_ring_sanity_and_fill_recovery(void);
 void test_crc32_known_vector(void);
+
+/* test_clock.c */
+void test_record_layout_is_32_bytes_with_the_stamps_in_the_padding(void);
+void test_rebase_adds_the_steps_that_came_after_the_record(void);
+void test_rebase_leaves_absolute_records_alone(void);
+void test_rebase_compares_the_stamps_modulo_the_wrap(void);
+void test_relative_time_comes_from_the_monotonic_clock(void);
+void test_rotation_rule(void);
+void test_journal_lines_byte_exact(void);
+void test_markers_byte_exact(void);
+void test_wdl_scan_accepts_the_step_record(void);
+void test_journal_trim_cuts_at_a_line_boundary(void);
+void test_relative_rows_take_the_offset(void);
+void test_mf4_prelude_keeps_the_start_at_the_patch_offsets(void);
 
 void setUp(void)
 {
@@ -68,6 +84,8 @@ static void test_parse_rejects_foreign_names(void)
                                      NULL));
     TEST_ASSERT_FALSE(dl_files_parse(".", NULL));
     TEST_ASSERT_FALSE(dl_files_parse(NULL, NULL));
+    /* the clock journal is not a log file: neither stream folds it */
+    TEST_ASSERT_FALSE(dl_files_parse("clock.jsonl", NULL));
 }
 
 static void test_make_parse_roundtrip(void)
@@ -133,6 +151,7 @@ static void test_scan_ignores_foreign_entries(void)
     dl_scan_add(&s, ".");
     dl_scan_add(&s, "..");
     dl_scan_add(&s, "notes.txt");
+    dl_scan_add(&s, "clock.jsonl");
     dl_scan_add(&s, "dl_1783000005.db");
     dl_scan_add(&s, "dl_bogus.db");
     TEST_ASSERT_EQUAL_INT(1, s.count);
@@ -274,13 +293,13 @@ static void test_asc_row_golden(void)
 {
     static const uint8_t DATA[] = { 0x01, 0x02, 0xAB };
     char row[80];
-    int n = dl_asc_row(row, sizeof(row), 1000, 2234, 0x7E8, 0, DATA, 3);
+    int n = dl_asc_row(row, sizeof(row), 1234, 0x7E8, 0, DATA, 3);
 
     TEST_ASSERT_GREATER_THAN(0, n);
     TEST_ASSERT_EQUAL_STRING(
         "   1.234000 1  7E8             Rx   d 3 01 02 AB\n", row);
 
-    n = dl_asc_row(row, sizeof(row), 0, 500, 0x1F334455, DL_FRAME_EXT,
+    n = dl_asc_row(row, sizeof(row), 500, 0x1F334455, DL_FRAME_EXT,
                    DATA, 2);
     TEST_ASSERT_EQUAL_STRING(
         "   0.500000 1  1F334455x       Rx   d 2 01 02\n", row);
@@ -343,7 +362,7 @@ static void test_mf4_record_golden(void)
     rec.u.f.data[1] = 0xBB;
 
     uint8_t buf[DL_MF4_REC_SIZE];
-    size_t n = dl_mf4_record(buf, 1, &rec);
+    size_t n = dl_mf4_record(buf, rec.ts_ms - 1, &rec);
 
     TEST_ASSERT_EQUAL_size_t(DL_MF4_REC_SIZE, n);
     /* t = 1.0 as f64 LE */
@@ -387,7 +406,7 @@ static void test_blf_builders_golden(void)
 
     uint8_t msg[DL_BLF_MSG_SIZE];
 
-    n = dl_blf_message(msg, 1000, &rec);
+    n = dl_blf_message(msg, rec.ts_ms - 1000, &rec);
     TEST_ASSERT_EQUAL_size_t(DL_BLF_MSG_SIZE, n);
     TEST_ASSERT_EQUAL_MEMORY("LOBJ", msg, 4);
     TEST_ASSERT_EQUAL_HEX8(1, msg[12]);    /* CAN_MESSAGE */
@@ -434,5 +453,18 @@ void app_main(void)
     RUN_TEST(test_record_sanity);
     RUN_TEST(test_ring_sanity_and_fill_recovery);
     RUN_TEST(test_crc32_known_vector);
+    /* the clock (test_clock.c, README "Time") */
+    RUN_TEST(test_record_layout_is_32_bytes_with_the_stamps_in_the_padding);
+    RUN_TEST(test_rebase_adds_the_steps_that_came_after_the_record);
+    RUN_TEST(test_rebase_leaves_absolute_records_alone);
+    RUN_TEST(test_rebase_compares_the_stamps_modulo_the_wrap);
+    RUN_TEST(test_relative_time_comes_from_the_monotonic_clock);
+    RUN_TEST(test_rotation_rule);
+    RUN_TEST(test_journal_lines_byte_exact);
+    RUN_TEST(test_markers_byte_exact);
+    RUN_TEST(test_wdl_scan_accepts_the_step_record);
+    RUN_TEST(test_journal_trim_cuts_at_a_line_boundary);
+    RUN_TEST(test_relative_rows_take_the_offset);
+    RUN_TEST(test_mf4_prelude_keeps_the_start_at_the_patch_offsets);
     UNITY_END();
 }

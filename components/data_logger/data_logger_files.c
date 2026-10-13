@@ -325,9 +325,8 @@ int dl_candump_row(char *out, size_t cap, int64_t ts_ms, uint32_t id,
     return n;
 }
 
-int dl_asc_row(char *out, size_t cap, int64_t start_ms, int64_t ts_ms,
-               uint32_t id, uint8_t flags, const uint8_t *data,
-               uint8_t dlc)
+int dl_asc_row(char *out, size_t cap, int64_t rel_ms, uint32_t id,
+               uint8_t flags, const uint8_t *data, uint8_t dlc)
 {
     if (dlc > 8)
     {
@@ -339,7 +338,7 @@ int dl_asc_row(char *out, size_t cap, int64_t start_ms, int64_t ts_ms,
     snprintf(ids, sizeof(ids), (flags & DL_FRAME_EXT) ? "%lXx" : "%lX",
              (unsigned long)(id & 0x1FFFFFFFu));
 
-    double t = (double)(ts_ms - start_ms) / 1000.0;
+    double t = (double)rel_ms / 1000.0;
     int n;
 
     if (flags & DL_FRAME_RTR)
@@ -547,16 +546,16 @@ size_t dl_mf4_prelude(uint8_t *buf, size_t cap, int64_t start_ms,
     memcpy(buf + 16, "WiCAN   ", 8);
     put_u16le(buf + 28, 410);
 
-    /* HD */
+    /* HD (its start time sits at DL_MF4_HD_START_OFF: commit re-patches) */
     lk = mf4_block(buf, off_hd, "##HD", 104, 6);
     put_u64le(buf + lk, off_dg);            /* hd_dg_first        */
     put_u64le(buf + lk + 8, off_fh);        /* hd_fh_first        */
-    put_u64le(buf + off_hd + 24 + 48, start_ns);
+    put_u64le(buf + DL_MF4_HD_START_OFF, start_ns);
 
-    /* FH + its MD comment */
+    /* FH + its MD comment (start at DL_MF4_FH_START_OFF) */
     lk = mf4_block(buf, off_fh, "##FH", 56, 2);
     put_u64le(buf + lk + 8, off_md);        /* fh_md_comment      */
-    put_u64le(buf + off_fh + 24 + 16, start_ns);
+    put_u64le(buf + DL_MF4_FH_START_OFF, start_ns);
     mf4_block(buf, off_md, "##MD", md_sz, 0);
     memcpy(buf + off_md + 24, MF4_XML_FH, strlen(MF4_XML_FH));
 
@@ -601,10 +600,9 @@ size_t dl_mf4_prelude(uint8_t *buf, size_t cap, int64_t start_ms,
     return total;
 }
 
-size_t dl_mf4_record(uint8_t *buf, int64_t start_ms,
-                     const dl_record_t *rec)
+size_t dl_mf4_record(uint8_t *buf, int64_t rel_ms, const dl_record_t *rec)
 {
-    put_f64le(buf, (double)(rec->ts_ms - start_ms) / 1000.0);
+    put_f64le(buf, (double)rel_ms / 1000.0);
     put_u32le(buf + 8, rec->u.f.id & 0x1FFFFFFFu);
     buf[12] = rec->u.f.flags;
     buf[13] = (rec->u.f.dlc <= 8) ? rec->u.f.dlc : 8;
@@ -668,11 +666,10 @@ size_t dl_blf_container_header(uint8_t *buf, uint32_t payload_len)
     return DL_BLF_CONT_HDR;
 }
 
-size_t dl_blf_message(uint8_t *buf, int64_t start_ms,
-                      const dl_record_t *rec)
+size_t dl_blf_message(uint8_t *buf, int64_t rel_ms, const dl_record_t *rec)
 {
     uint8_t dlc = (rec->u.f.dlc <= 8) ? rec->u.f.dlc : 8;
-    uint64_t ns = (uint64_t)(rec->ts_ms - start_ms) * 1000000ULL;
+    uint64_t ns = (rel_ms > 0) ? (uint64_t)rel_ms * 1000000ULL : 0;
     uint32_t id = rec->u.f.id & 0x1FFFFFFFu;
 
     if (rec->u.f.flags & DL_FRAME_EXT)

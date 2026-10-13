@@ -40,6 +40,7 @@
 
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -83,6 +84,7 @@ static void frame_to_record(const can_core_frame_t *f,
     gettimeofday(&tv, NULL);
     memset(rec, 0, sizeof(*rec));
     rec->ts_ms = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    rec->mono_ms = (uint32_t)(esp_timer_get_time() / 1000);
     rec->kind = DL_REC_FRAME;
     rec->u.f.id = f->id;
     rec->u.f.dlc = (f->dlc <= 8) ? f->dlc : 8;
@@ -173,6 +175,7 @@ esp_err_t dl_can_test_push(int n)
         gettimeofday(&tv, NULL);
         memset(&rec, 0, sizeof(rec));
         rec.ts_ms = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+        rec.mono_ms = (uint32_t)(esp_timer_get_time() / 1000);
         rec.kind = DL_REC_FRAME;
         rec.u.f.id = 0x100u + (uint32_t)(i & 0x0F);
         rec.u.f.dlc = 8;

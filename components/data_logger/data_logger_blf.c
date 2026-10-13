@@ -35,6 +35,11 @@
  * 48-byte CAN_MESSAGE objects. Messages accumulate in a PSRAM buffer
  * and flush as one container per commit (or when the buffer fills).
  * single_use: timestamps are ns relative to the header start time.
+ *
+ * The clock (2026-10-13): messages are relative to the open by the
+ * monotonic clock; the header's start and end times are re-computed
+ * from the wall clock as it is NOW at every commit, so a clock step
+ * while the file is open corrects them.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -44,6 +49,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include <unistd.h>
 
 #include "data_logger_private.h"
@@ -56,6 +62,19 @@ static const char *TAG = "data_logger";
 /* one engine instance can exist (CAN stream only): the container
  * accumulator can be a static PSRAM buffer */
 static uint8_t s_cont[BLF_CONT_SZ] EXT_RAM_BSS_ATTR;
+
+static int64_t wall_ms_now(void)
+{
+    struct timeval tv;
+
+    gettimeofday(&tv, NULL);
+    return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+static uint32_t mono_ms_now(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
 
 static esp_err_t blf_flush_container(dl_blf_ctx_t *c)
 {
@@ -86,9 +105,18 @@ static esp_err_t blf_patch_header(dl_blf_ctx_t *c)
 {
     uint8_t hdr[DL_BLF_HDR_SIZE];
     FILE *f = c->f;
+    int64_t start = dl_clock_start_ms(wall_ms_now(), mono_ms_now(),
+                                      c->mono_open);
 
-    dl_blf_file_header(hdr, c->start_ms, c->last_ms, c->bytes,
-                       DL_BLF_HDR_SIZE + c->uncomp, c->objects);
+    /* the start as the wall clock says now (the ms rounding of two
+       clocks aside): a step while the file was open corrects it */
+    if (start - c->start_ms >= 2 || c->start_ms - start >= 2)
+    {
+        c->start_ms = start;
+    }
+
+    dl_blf_file_header(hdr, c->start_ms, c->start_ms + c->last_rel_ms,
+                       c->bytes, DL_BLF_HDR_SIZE + c->uncomp, c->objects);
 
     if (fseek(f, 0, SEEK_SET) != 0 ||
         fwrite(hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
@@ -132,11 +160,9 @@ static esp_err_t blf_open(void *ctx, const char *path, bool frames)
 
     setvbuf(f, c->buf, _IOFBF, BLF_BUF_SZ);
 
-    struct timeval tv;
-
-    gettimeofday(&tv, NULL);
-    c->start_ms = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-    c->last_ms = c->start_ms;
+    c->mono_open = mono_ms_now();
+    c->start_ms = wall_ms_now();
+    c->last_rel_ms = 0;
     c->uncomp = 0;
     c->objects = 0;
     c->cfill = 0;
@@ -207,10 +233,16 @@ static esp_err_t blf_write(void *ctx, const dl_record_t *rec,
         return ESP_FAIL;
     }
 
-    c->cfill += (uint32_t)dl_blf_message(s_cont + c->cfill, c->start_ms,
-                                         rec);
+    int64_t rel = dl_clock_rel_ms(rec, c->start_ms, c->mono_open);
+
+    c->cfill += (uint32_t)dl_blf_message(s_cont + c->cfill, rel, rec);
     c->objects++;
-    c->last_ms = rec->ts_ms;
+
+    if (rel > c->last_rel_ms)
+    {
+        c->last_rel_ms = rel;
+    }
+
     return ESP_OK;
 }
 

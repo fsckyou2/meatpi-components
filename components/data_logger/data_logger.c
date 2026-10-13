@@ -22,40 +22,39 @@
 
 /**
  * @file data_logger.c
- * @brief Lifecycle, the param registry, the PSRAM record rings, and
- *        the writer task (see include/data_logger.h for the model).
- *        Settings live in data_logger_settings.c (standard §4.1). The
- *        writer is the ONLY code that opens files: it follows
- *        external_storage_is_mounted(), so a yanked card just parks
- *        the writer while the rings keep absorbing (drop-oldest).
+ * @brief The core: the param registry, the PSRAM record rings, the
+ *        lifecycle and the public API (see include/data_logger.h for the
+ *        model). Settings live in data_logger_settings.c (standard 4.1),
+ *        the writer task and its streams in data_logger_writer.c, the
+ *        card-side file operations in data_logger_store.c, the clock in
+ *        data_logger_journal.c (split 2026-10-13: the file had grown to
+ *        twice the standard's size).
  *
  * Two streams since 2026-07-09 (TASK addendum): params
  * (dl_<epoch>.<ext>, `format` setting) and CAN frames
  * (can_<epoch>.<ext>, `can_format`/`can_log`), each with its own
  * engine instance, rotation and retention. Separate rings so a CAN
  * flood can never evict param records.
+ *
+ * The clock (2026-10-13, issue #984): every record is stamped with the
+ * wall clock AND the monotonic clock; the writer re-bases the records
+ * queued before a clock step (data_logger_journal.c).
  */
-#include <dirent.h>
-#include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "esp_attr.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "freertos/task.h"
 
-#include "dev_status_manager.h"
-#include "external_storage.h"
 #include "log_manager.h"
+#include "restart_tracker.h"
 
 #include "data_logger_private.h"
 
@@ -88,9 +87,9 @@ typedef struct
    the records that were still queued BEFORE anything new. Power cuts and
    EN-pin resets leave random or bit-rotten PSRAM; the envelope catches
    that and starts clean. Same pattern as restart_tracker / log_manager's
-   ring, including the 64-byte MSPI tuning guard that must lead the object. */
+   ring, including the 64-byte MSPI tuning guard that must lead the object.
+   Version 2 since 2026-10-13 (the record grew its monotonic stamp). */
 #define DL_PS_MAGIC   0x53504C44u /* "DLPS" */
-#define DL_PS_VERSION 1u
 
 typedef struct
 {
@@ -157,6 +156,17 @@ static void ring_trim(dl_ring_t *r)
     }
 }
 
+/* records carried over a reset were stamped against the previous boot's
+ * monotonic clock: their wall stamps stay as they are, whatever this
+ * boot's clock does (the writer never re-bases them) */
+static void ring_mark_absolute(dl_ring_t *r)
+{
+    for (uint32_t i = 0; i < r->fill; i++)
+    {
+        r->buf[(r->tail + i) % r->cap].flags |= DL_REC_ABS;
+    }
+}
+
 /* returns the number of records carried over from before a warm reset */
 static uint32_t ps_adopt(void)
 {
@@ -194,6 +204,8 @@ static uint32_t ps_adopt(void)
     s_ps.frame_ring.buf = s_ps.frame_slots;
     ring_trim(&s_ps.param_ring);
     ring_trim(&s_ps.frame_ring);
+    ring_mark_absolute(&s_ps.param_ring);
+    ring_mark_absolute(&s_ps.frame_ring);
     s_ps.param_ring.dropped = 0;
     s_ps.frame_ring.dropped = 0;
 
@@ -205,143 +217,14 @@ static uint32_t ps_adopt(void)
     return s_ps.param_ring.fill + s_ps.frame_ring.fill;
 }
 
-/* writer task. PSRAM stack per the standard: it only touches the SD
- * card via SDMMC (never internal flash), so the §2 corollary doesn't
- * apply, and 10 KB of internal RAM is exactly what broke the build
- * that kept it internal (bench 2026-07-07: ~2.5 KB internal free =
- * wifi auth AND sdmmc DMA allocations failing). */
-static TaskHandle_t s_task;
-static StaticTask_t s_tcb;             /* internal: FreeRTOS object */
-static StackType_t s_stack[10240] EXT_RAM_BSS_ATTR;
+/* the restart tracker's state, read once at start on the main task (the
+ * boot count names this boot in the clock journal); PSRAM: it is big */
+static restart_tracker_state_t s_rt EXT_RAM_BSS_ATTR;
 
-/* ---- streams ---------------------------------------------------------------- */
-
-typedef struct
-{
-    const dl_engine_t *eng;
-    void              *ctx;
-    const char        *prefix;    /* DL_PREFIX_PARAM / DL_PREFIX_CAN  */
-    bool               frames;    /* record kind this stream carries  */
-    bool               active;    /* logging this stream this boot    */
-    uint32_t           max_mb;
-    uint32_t           max_files;
-    dl_ring_t         *ring;
-    char               cur_path[80];
-    /* per-stream stats */
-    char               file[48];
-    uint32_t           file_rows;
-    uint32_t           files;
-    uint32_t           rotations;
-    uint32_t           written;
-    /* ROBUSTNESS.md */
-    uint32_t           open_fails;    /* consecutive open failures        */
-    uint32_t           corrupt_files; /* *.corrupt set aside for this stream */
-    char               last_try[48];  /* file name of the last open attempt */
-} dl_stream_t;
-
-enum { ST_PARAM = 0, ST_CAN = 1, ST_COUNT = 2 };
-
-/* engine contexts: one per (engine kind × stream) so any format combo
- * can have two files open at once */
-static dl_append_ctx_t s_ap_ctx[ST_COUNT];
-static dl_sq_ctx_t s_sq_ctx[ST_COUNT];
-
-static dl_stream_t s_stream[ST_COUNT] =
-{
-    { .prefix = DL_PREFIX_PARAM, .frames = false,
-      .ring = &s_param_ring },
-    { .prefix = DL_PREFIX_CAN, .frames = true,
-      .ring = &s_frame_ring },
-};
-
-static data_logger_stats_t s_stats;
-static volatile bool s_run;
-static volatile bool s_gate = true;  /* logger.enable/disable rules */
-static volatile uint32_t s_park_seq; /* bumps each time the writer parks with
-                                        both files closed (stop() waits on it) */
+static data_logger_stats_t s_stats;  /* enabled, running, salvaged; the
+                                        streams and the storage counters
+                                        are the writer's and the store's */
 static bool s_hooked;                /* esp_restart shutdown handler in place */
-#define DL_OPEN_FAILS_FAULT 3
-
-/* ---- engine binding (applied from data_logger_settings.c) ------------------ */
-
-static dl_mf4_ctx_t s_mf4_ctx;   /* CAN stream only (schema)          */
-static dl_blf_ctx_t s_blf_ctx;
-
-static void bind_engine(int idx, const char *fmt)
-{
-    dl_stream_t *st = &s_stream[idx];
-
-    if (strcmp(fmt, "csv") == 0)
-    {
-        st->eng = &dl_engine_csv;
-        st->ctx = &s_ap_ctx[idx];
-    }
-    else if (strcmp(fmt, "binary") == 0)
-    {
-        st->eng = &dl_engine_binary;
-        st->ctx = &s_ap_ctx[idx];
-    }
-    else if (strcmp(fmt, "candump") == 0)
-    {
-        st->eng = &dl_engine_candump;
-        st->ctx = &s_ap_ctx[idx];
-    }
-    else if (strcmp(fmt, "asc") == 0)
-    {
-        st->eng = &dl_engine_asc;
-        st->ctx = &s_ap_ctx[idx];
-    }
-    else if (strcmp(fmt, "jsonl") == 0)
-    {
-        st->eng = &dl_engine_jsonl;
-        st->ctx = &s_ap_ctx[idx];
-    }
-    else if (strcmp(fmt, "mf4") == 0)
-    {
-        st->eng = &dl_engine_mf4;
-        st->ctx = &s_mf4_ctx;
-    }
-    else if (strcmp(fmt, "blf") == 0)
-    {
-        st->eng = &dl_engine_blf;
-        st->ctx = &s_blf_ctx;
-    }
-    else
-    {
-        st->eng = &dl_engine_sqlite;
-        st->ctx = &s_sq_ctx[idx];
-    }
-}
-
-/* on_apply's landing point for the writer-owned knobs: engine binding,
- * rotation/retention, the frame ring's live length, and which streams
- * are active this boot */
-void dl_core_apply(const dl_cfg_t *cfg)
-{
-    bind_engine(ST_PARAM, cfg->format);
-    bind_engine(ST_CAN, cfg->can_format);
-
-    s_stream[ST_PARAM].max_mb = cfg->max_file_mb;
-    s_stream[ST_PARAM].max_files = cfg->max_files;
-    s_stream[ST_CAN].max_mb = cfg->can_max_file_mb;
-    s_stream[ST_CAN].max_files = cfg->can_max_files;
-    uint32_t want = (cfg->ring_len > DL_CAN_RING_MAX) ? DL_CAN_RING_MAX
-                                                      : cfg->ring_len;
-
-    if (s_frame_ring.cap != want)
-    {
-        /* a different live length re-bases the modular indices: anything
-           carried over a warm reset in this ring is void (a settings
-           change always came with a clean restart anyway) */
-        s_frame_ring.cap = want;
-        s_frame_ring.head = 0;
-        s_frame_ring.tail = 0;
-        s_frame_ring.fill = 0;
-    }
-
-    s_stream[ST_PARAM].active = cfg->enabled;
-    s_stream[ST_CAN].active = cfg->enabled && cfg->can.log;
-}
 
 /* ---- rings ------------------------------------------------------------------ */
 
@@ -388,9 +271,14 @@ static bool ring_pop(dl_ring_t *r, dl_record_t *rec)
     return got;
 }
 
+static dl_ring_t *ring_of(int st)
+{
+    return (st == DL_ST_CAN) ? &s_frame_ring : &s_param_ring;
+}
+
 esp_err_t dl_frame_push(const dl_record_t *rec)
 {
-    if (!dl_settings_config()->enabled || !s_stream[ST_CAN].active)
+    if (!dl_settings_config()->enabled || !dl_writer_stream_active(DL_ST_CAN))
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -398,9 +286,24 @@ esp_err_t dl_frame_push(const dl_record_t *rec)
     return ring_push(&s_frame_ring, rec);
 }
 
-/* ---- writer ---------------------------------------------------------------- */
+/* ---- the core as the writer sees it ------------------------------------------ */
 
-static void params_forget_db_ids(void)
+bool dl_core_pop(int st, dl_record_t *rec)
+{
+    return ring_pop(ring_of(st), rec);
+}
+
+uint32_t dl_core_fill(int st)
+{
+    return ring_of(st)->fill;
+}
+
+dl_param_entry_t *dl_core_param(int idx)
+{
+    return (idx >= 0 && idx < DL_MAX_PARAMS) ? &s_params[idx] : NULL;
+}
+
+void dl_core_forget_db_ids(void)
 {
     for (int i = 0; i < DL_MAX_PARAMS; i++)
     {
@@ -408,532 +311,26 @@ static void params_forget_db_ids(void)
     }
 }
 
-static void scan_dir(dl_scan_t *scan, const char *prefix)
+/* on_apply's landing point for the writer-owned knobs: the frame ring's
+ * live length here, the engine binding and the stream limits in the
+ * writer */
+void dl_core_apply(const dl_cfg_t *cfg)
 {
-    DIR *dir = opendir(DL_DIR);
+    uint32_t want = (cfg->ring_len > DL_CAN_RING_MAX) ? DL_CAN_RING_MAX
+                                                      : cfg->ring_len;
 
-    dl_scan_init(scan, prefix);
-
-    if (dir == NULL)
+    if (s_frame_ring.cap != want)
     {
-        return;
+        /* a different live length re-bases the modular indices: anything
+           carried over a warm reset in this ring is void (a settings
+           change always came with a clean restart anyway) */
+        s_frame_ring.cap = want;
+        s_frame_ring.head = 0;
+        s_frame_ring.tail = 0;
+        s_frame_ring.fill = 0;
     }
 
-    struct dirent *ent;
-
-    while ((ent = readdir(dir)) != NULL)
-    {
-        dl_scan_add(scan, ent->d_name);
-    }
-
-    closedir(dir);
-}
-
-static void enforce_retention(dl_stream_t *st)
-{
-    dl_scan_t scan;
-
-    scan_dir(&scan, st->prefix);
-    st->files = (uint32_t)scan.count;
-
-    while (scan.count > (int)st->max_files)
-    {
-        char path[80];
-
-        snprintf(path, sizeof(path), DL_DIR "/%s", scan.oldest);
-
-        if (unlink(path) != 0)
-        {
-            ESP_LOGW(TAG, "retention unlink %s failed", path);
-            break;
-        }
-
-        ESP_LOGI(TAG, "retention: deleted %s", scan.oldest);
-        scan_dir(&scan, st->prefix);
-        st->files = (uint32_t)scan.count;
-    }
-}
-
-/* A dev_status fault latches to NVS: a flash write. The writer task's
- * stack is in PSRAM, and a task on a PSRAM stack must never write flash:
- * the cache is off during the write and the stack is gone with it
- * (cache_utils.c:126 assert, three panics on the bench, 2026-09-07).
- * Raise from a short-lived task on an internal stack instead. */
-typedef struct
-{
-    char code[24];
-    char detail[48];
-} dl_fault_msg_t;
-
-static void fault_task(void *arg)
-{
-    dl_fault_msg_t *m = arg;
-
-    dev_status_manager_fault_raise(m->code, m->detail);
-    heap_caps_free(m);
-    vTaskDelete(NULL);
-}
-
-static void raise_fault_async(const char *code, const char *detail)
-{
-    dl_fault_msg_t *m = heap_caps_malloc(sizeof(*m),
-                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-
-    if (m == NULL)
-    {
-        return;
-    }
-
-    snprintf(m->code, sizeof(m->code), "%s", code);
-    snprintf(m->detail, sizeof(m->detail), "%s", (detail != NULL) ? detail : "");
-
-    if (xTaskCreate(fault_task, "dl_fault", 4096, m, 2, NULL) != pdPASS)
-    {
-        heap_caps_free(m);
-        ESP_LOGW(TAG, "fault %s not latched (no task)", code);
-    }
-}
-
-/* set-aside files (<name>.corrupt) of one stream; the oldest by name */
-static uint32_t count_corrupt(const char *prefix, char *oldest, size_t cap)
-{
-    DIR *dir = opendir(DL_DIR);
-    uint32_t n = 0;
-
-    if (oldest != NULL && cap > 0)
-    {
-        oldest[0] = '\0';
-    }
-
-    if (dir == NULL)
-    {
-        return 0;
-    }
-
-    struct dirent *ent;
-
-    while ((ent = readdir(dir)) != NULL)
-    {
-        if (!dl_recover_is_corrupt_name(ent->d_name, prefix, NULL))
-        {
-            continue;
-        }
-
-        n++;
-
-        if (oldest != NULL && cap > strlen(ent->d_name) &&
-            (oldest[0] == '\0' || strcmp(ent->d_name, oldest) < 0))
-        {
-            strcpy(oldest, ent->d_name);
-        }
-    }
-
-    closedir(dir);
-    return n;
-}
-
-/* the newest file is resumable only if the current engine wrote it */
-static bool ext_matches(const char *fname, const char *ext)
-{
-    size_t fl = strlen(fname);
-    size_t el = strlen(ext);
-
-    return fl > el && strcmp(fname + fl - el, ext) == 0;
-}
-
-/* open the newest existing file, or a fresh one when none/rotating */
-static esp_err_t open_current(dl_stream_t *st, bool force_new)
-{
-    dl_scan_t scan;
-    char fname[48];
-
-    if (st->eng->single_use)
-    {
-        force_new = true; /* relative-time / patched-header formats */
-    }
-
-    mkdir(DL_DIR, 0775);
-    scan_dir(&scan, st->prefix);
-
-    bool resume = !force_new && scan.count > 0 &&
-                  ext_matches(scan.newest, st->eng->ext);
-
-    if (resume && st->eng->resume_max != 0)
-    {
-        struct stat sb;
-        char p[80];
-
-        snprintf(p, sizeof(p), DL_DIR "/%s", scan.newest);
-
-        if (stat(p, &sb) == 0 && (uint64_t)sb.st_size > st->eng->resume_max)
-        {
-            ESP_LOGI(TAG, "%s is too big for the torn-tail check; starting "
-                     "a new file", scan.newest);
-            resume = false;
-        }
-    }
-
-    if (resume)
-    {
-        strcpy(fname, scan.newest);
-    }
-    else
-    {
-        int64_t epoch = (int64_t)time(NULL);
-        int64_t newest_epoch = 0;
-
-        /* clock rolled back / rotated within 1 s: keep names monotonic */
-        if (scan.count > 0 && dl_files_parse(scan.newest, &newest_epoch) &&
-            epoch <= newest_epoch)
-        {
-            epoch = newest_epoch + 1;
-        }
-
-        dl_files_make(fname, sizeof(fname), st->prefix, epoch,
-                      st->eng->ext);
-    }
-
-    snprintf(st->cur_path, sizeof(st->cur_path), DL_DIR "/%s", fname);
-    snprintf(st->last_try, sizeof(st->last_try), "%s", fname);
-
-    esp_err_t err = st->eng->open(st->ctx, st->cur_path, st->frames);
-
-    if (err != ESP_OK)
-    {
-        st->cur_path[0] = '\0';
-        return err;
-    }
-
-    if (!st->frames)
-    {
-        params_forget_db_ids();
-    }
-
-    snprintf(st->file, sizeof(st->file), "%s", fname);
-    st->file_rows = 0;
-    enforce_retention(st);
-    st->corrupt_files = count_corrupt(st->prefix, NULL, 0);
-    s_stats.corrupt = s_stream[ST_PARAM].corrupt_files +
-                      s_stream[ST_CAN].corrupt_files;
-    ESP_LOGI(TAG, "logging to %s (rotate at %lu MB)", fname,
-             (unsigned long)st->max_mb);
-    return ESP_OK;
-}
-
-static void close_current(dl_stream_t *st)
-{
-    st->eng->close(st->ctx);
-    st->cur_path[0] = '\0';
-    st->file[0] = '\0';
-}
-
-static void close_all(void)
-{
-    for (int i = 0; i < ST_COUNT; i++)
-    {
-        if (s_stream[i].eng->is_open(s_stream[i].ctx))
-        {
-            close_current(&s_stream[i]);
-        }
-    }
-}
-
-static void rotate(dl_stream_t *st)
-{
-    char rotated[48];
-
-    snprintf(rotated, sizeof(rotated), "%s", st->file);
-    close_current(st);
-    st->rotations++;
-
-    if (open_current(st, true) == ESP_OK)
-    {
-        dl_events_rotated(rotated);
-    }
-}
-
-/* keep at most DL_CORRUPT_KEEP set-aside files per stream */
-static void prune_corrupt(dl_stream_t *st)
-{
-    char oldest[64];
-
-    for (int guard = 0; guard < 8; guard++)
-    {
-        uint32_t n = count_corrupt(st->prefix, oldest, sizeof(oldest));
-
-        st->corrupt_files = n;
-
-        if (n <= DL_CORRUPT_KEEP || oldest[0] == '\0')
-        {
-            return;
-        }
-
-        char path[96];
-
-        snprintf(path, sizeof(path), DL_DIR "/%s", oldest);
-
-        if (unlink(path) != 0)
-        {
-            return;
-        }
-
-        ESP_LOGI(TAG, "set-aside cap: deleted %s", oldest);
-    }
-}
-
-/* The file just failed as CORRUPT (ROBUSTNESS.md case 5): set it aside as
- * <name>.corrupt, drop its journal, latch a fault, copy what sqlite can
- * still read into a fresh file with the old name, and go on in a new
- * file. Never retry a bad file: that was the loop that dropped every
- * record. Writer task only. */
-static void quarantine(dl_stream_t *st)
-{
-    char orig[48], bad[64], origpath[96], badpath[96], jpath[112];
-
-    snprintf(orig, sizeof(orig), "%s",
-             st->file[0] != '\0' ? st->file : st->last_try);
-    close_current(st);
-
-    if (orig[0] == '\0' || !dl_recover_corrupt_name(orig, bad, sizeof(bad)))
-    {
-        return;
-    }
-
-    snprintf(origpath, sizeof(origpath), DL_DIR "/%s", orig);
-    snprintf(badpath, sizeof(badpath), DL_DIR "/%s", bad);
-    snprintf(jpath, sizeof(jpath), "%s-journal", origpath);
-    unlink(badpath); /* an older set-aside copy of the same name */
-
-    if (rename(origpath, badpath) != 0)
-    {
-        ESP_LOGE(TAG, "%s: cannot set aside (errno %d); deleting it so "
-                 "logging can go on", orig, errno);
-        unlink(origpath);
-        bad[0] = '\0';
-    }
-
-    unlink(jpath); /* a hot journal must never meet a new file of that name */
-    raise_fault_async("logger_file_corrupt", orig);
-    s_stats.corrupt++;
-    dl_events_error("corrupt", (int)s_stats.corrupt);
-    ESP_LOGE(TAG, "%s is corrupt: set aside as %s; logging continues in a "
-             "fresh file", orig, bad[0] != '\0' ? bad : "(deleted)");
-    prune_corrupt(st);
-
-    if (bad[0] != '\0' && st->eng == &dl_engine_sqlite)
-    {
-        uint32_t rows = 0;
-
-        if (dl_sq_salvage(badpath, origpath, st->frames, 120000, &rows) ==
-                ESP_OK && rows > 0)
-        {
-            ESP_LOGW(TAG, "salvaged %lu row(s) from %s into %s",
-                     (unsigned long)rows, bad, orig);
-        }
-    }
-
-    if (open_current(st, true) != ESP_OK)
-    {
-        s_stats.errors++;
-    }
-}
-
-/* open the stream's file; a corrupt one is set aside on the spot; repeated
- * failures latch a fault and slow the retries down (case 10) */
-static bool ensure_open(dl_stream_t *st)
-{
-    if (st->eng->is_open(st->ctx))
-    {
-        return true;
-    }
-
-    if (open_current(st, false) == ESP_OK)
-    {
-        st->open_fails = 0;
-        return true;
-    }
-
-    if (st->eng->corrupt != NULL && st->eng->corrupt(st->ctx))
-    {
-        quarantine(st);
-
-        if (st->eng->is_open(st->ctx))
-        {
-            st->open_fails = 0;
-            return true;
-        }
-    }
-
-    s_stats.errors++;
-
-    if (++st->open_fails == DL_OPEN_FAILS_FAULT)
-    {
-        ESP_LOGE(TAG, "%s stream: cannot open a file on the card; backing "
-                 "off to 10 s retries", st->frames ? "CAN" : "params");
-        raise_fault_async("logger_storage_error",
-                          st->frames ? "can" : "params");
-    }
-
-    return false;
-}
-
-/* drain up to batch_rows records inside one transaction/flush */
-static void write_batch(dl_stream_t *st)
-{
-    dl_record_t rec;
-    uint32_t n = 0;
-    bool failed = false;
-    uint32_t batch_rows = dl_settings_config()->batch_rows;
-
-    if (st->eng->begin(st->ctx) != ESP_OK)
-    {
-        failed = true;
-    }
-
-    while (!failed && n < batch_rows && ring_pop(st->ring, &rec))
-    {
-        dl_param_entry_t *p =
-            (rec.kind == DL_REC_PARAM) ? &s_params[rec.u.p.param] : NULL;
-
-        if (st->eng->write(st->ctx, &rec, p) != ESP_OK)
-        {
-            failed = true;
-            break;
-        }
-
-        n++;
-    }
-
-    if (!failed && st->eng->commit(st->ctx) != ESP_OK)
-    {
-        failed = true;
-    }
-
-    if (failed)
-    {
-        s_stats.errors++;
-        dl_events_error("write", (int)s_stats.errors);
-
-        if (st->eng->corrupt != NULL && st->eng->corrupt(st->ctx))
-        {
-            quarantine(st); /* set aside + fresh file: never retry a bad file */
-            return;
-        }
-
-        /* card yanked mid-write, disk full: drop the file handle and let
-         * the mount/open path recover next lap */
-        close_current(st);
-        return;
-    }
-
-    st->written += n;
-    st->file_rows += n;
-
-    if (st->eng->bytes(st->ctx) >=
-        (uint64_t)st->max_mb * 1024u * 1024u)
-    {
-        rotate(st);
-    }
-}
-
-static void writer_task(void *arg)
-{
-    const dl_cfg_t *cfg = dl_settings_config();
-
-    (void)arg;
-
-    while (true)
-    {
-        if (!s_run || !s_gate)
-        {
-            /* stopped, or paused by a logger.disable rule: the rings
-             * keep absorbing (drop-oldest), so re-enabling flushes
-             * the newest records from before the trigger */
-            close_all();
-            s_stats.storage_ok = false;
-            s_park_seq++; /* data_logger_stop() waits for this */
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200)); /* resume promptly too */
-            continue;
-        }
-
-        if (!external_storage_is_mounted())
-        {
-            if (s_stream[ST_PARAM].eng->is_open(s_stream[ST_PARAM].ctx) ||
-                s_stream[ST_CAN].eng->is_open(s_stream[ST_CAN].ctx))
-            {
-                ESP_LOGW(TAG, "card gone; parking");
-                close_all();
-            }
-
-            s_stats.storage_ok = false;
-            vTaskDelay(pdMS_TO_TICKS(500));
-            continue;
-        }
-
-        bool all_open = true;
-        bool backoff = false;
-
-        for (int i = 0; i < ST_COUNT; i++)
-        {
-            dl_stream_t *st = &s_stream[i];
-
-            if (st->active && !ensure_open(st))
-            {
-                all_open = false;
-                backoff = backoff || st->open_fails >= DL_OPEN_FAILS_FAULT;
-            }
-        }
-
-        if (!all_open)
-        {
-            s_stats.storage_ok = false;
-            vTaskDelay(pdMS_TO_TICKS(backoff ? 10000 : 2000));
-            continue;
-        }
-
-        s_stats.storage_ok = true;
-
-        if (s_param_ring.fill >= cfg->batch_rows ||
-            s_frame_ring.fill >= cfg->batch_rows)
-        {
-            /* keep draining hot rings without the nap */
-            if (s_param_ring.fill >= cfg->batch_rows)
-            {
-                write_batch(&s_stream[ST_PARAM]);
-            }
-
-            if (s_frame_ring.fill >= cfg->batch_rows &&
-                s_stream[ST_CAN].active)
-            {
-                write_batch(&s_stream[ST_CAN]);
-            }
-
-            continue;
-        }
-
-        /* the nap ends early when the gate flips (dl_runtime_gate notifies):
-           a pause (a rule, /api/logger/gate or the export reading the
-           active file) closes the files right away instead of up to
-           flush_ms later (2026-09-06; the export used to find the newest
-           file still locked and return nothing) */
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(cfg->flush_ms));
-
-        if (!s_run || !s_gate)
-        {
-            continue; /* gate flipped during the nap: park FIRST, a
-                         "paused" logger must not leak a batch */
-        }
-
-        if (s_param_ring.fill > 0 && s_stream[ST_PARAM].active)
-        {
-            write_batch(&s_stream[ST_PARAM]);
-        }
-
-        if (s_frame_ring.fill > 0 && s_stream[ST_CAN].active)
-        {
-            write_batch(&s_stream[ST_CAN]);
-        }
-    }
+    dl_writer_bind(cfg);
 }
 
 /* ---- lifecycle -------------------------------------------------------------- */
@@ -969,7 +366,7 @@ esp_err_t data_logger_init(void)
  * the PSRAM envelope covers those (case 6). */
 static void dl_on_shutdown(void)
 {
-    if (s_run)
+    if (s_stats.running)
     {
         ESP_LOGI(TAG, "restart: flushing and closing the log files");
         data_logger_stop();
@@ -983,11 +380,10 @@ esp_err_t data_logger_start(void)
     if (!dl_settings_is_configured())
     {
         ESP_LOGE(TAG, "unconfigured; not starting");
-        return ESP_ERR_INVALID_STATE; /* standard §4.3 step 5 */
+        return ESP_ERR_INVALID_STATE; /* standard 4.3 step 5 */
     }
 
     s_stats.enabled = cfg->enabled;
-    s_stats.can_enabled = s_stream[ST_CAN].active;
 
     if (!cfg->enabled)
     {
@@ -995,40 +391,31 @@ esp_err_t data_logger_start(void)
         return ESP_OK;
     }
 
-    s_run = true;
+    /* the boot count names this boot in the clock journal (main task:
+       the tracker's state is copied under its lock, into PSRAM) */
+    if (restart_tracker_get_state(&s_rt) == ESP_OK)
+    {
+        dl_journal_set_boot(s_rt.boot_count);
+    }
 
     if (!s_hooked && esp_register_shutdown_handler(dl_on_shutdown) == ESP_OK)
     {
         s_hooked = true;
     }
 
-    if (s_task == NULL)
+    if (dl_writer_start() != ESP_OK)
     {
-        s_task = xTaskCreateStatic(writer_task, "dl_writer",
-                                   sizeof(s_stack) / sizeof(s_stack[0]),
-                                   NULL, 3, s_stack, &s_tcb);
-
-        if (s_task == NULL)
-        {
-            return ESP_FAIL;
-        }
-    }
-
-    if (s_stream[ST_CAN].active && dl_can_start() != ESP_OK)
-    {
-        ESP_LOGW(TAG, "CAN drain task failed; can stream off");
-        s_stream[ST_CAN].active = false;
-        s_stats.can_enabled = false;
+        return ESP_FAIL;
     }
 
     s_stats.running = true;
     ESP_LOGI(TAG, "started (params=%s%s, can=%s%s, batch %lu, "
-             "flush %lu ms)", s_stream[ST_PARAM].eng->ext + 1,
+             "flush %lu ms)", dl_writer_engine_name(DL_ST_PARAM),
              cfg->autopid_log == 2 ? "+autopid.all"
              : cfg->autopid_log == 1 ? "+autopid.changed" : "",
-             s_stream[ST_CAN].active ? s_stream[ST_CAN].eng->ext + 1
-                                     : "off",
-             (s_stream[ST_CAN].active && cfg->can.monitor_all)
+             dl_writer_stream_active(DL_ST_CAN)
+                 ? dl_writer_engine_name(DL_ST_CAN) : "off",
+             (dl_writer_stream_active(DL_ST_CAN) && cfg->can.monitor_all)
                  ? "/all-ids" : "",
              (unsigned long)cfg->batch_rows,
              (unsigned long)cfg->flush_ms);
@@ -1037,35 +424,8 @@ esp_err_t data_logger_start(void)
 
 esp_err_t data_logger_stop(void)
 {
-    uint32_t seq = s_park_seq;
-
-    s_run = false;
     s_stats.running = false;
-
-    if (s_task == NULL)
-    {
-        return ESP_OK;
-    }
-
-    /* synchronous since 2026-09-07 (ROBUSTNESS.md cases 7/8): sleep entry
-       unmounts the card right after this and a restart cuts the IO,
-       wait for the writer to finish its batch and close both files */
-    xTaskNotifyGive(s_task);
-
-    for (int i = 0; i < 300 && s_park_seq == seq; i++)
-    {
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    if (s_park_seq == seq)
-    {
-        ESP_LOGW(TAG, "stop: the writer did not park within 3 s");
-    }
-    else
-    {
-        ESP_LOGI(TAG, "stopped: log files flushed and closed");
-    }
-
+    dl_writer_stop();
     return ESP_OK;
 }
 
@@ -1114,8 +474,8 @@ esp_err_t data_logger_register_param(const char *source, const char *name,
     return err;
 }
 
-esp_err_t data_logger_write_at(dl_param_t param, int64_t epoch_ms,
-                               double value)
+static esp_err_t param_push(dl_param_t param, int64_t epoch_ms, double value,
+                            uint8_t flags)
 {
     if (param < 0 || param >= DL_MAX_PARAMS || !s_params[param].used)
     {
@@ -1132,9 +492,18 @@ esp_err_t data_logger_write_at(dl_param_t param, int64_t epoch_ms,
         .ts_ms = epoch_ms,
         .u.p = { .value = value, .param = param },
         .kind = DL_REC_PARAM,
+        .flags = flags,
+        .mono_ms = (uint32_t)(esp_timer_get_time() / 1000),
     };
 
     return ring_push(&s_param_ring, &rec);
+}
+
+esp_err_t data_logger_write_at(dl_param_t param, int64_t epoch_ms,
+                               double value)
+{
+    /* an explicit stamp is the producer's word: never re-based */
+    return param_push(param, epoch_ms, value, DL_REC_ABS);
 }
 
 esp_err_t data_logger_write(dl_param_t param, double value)
@@ -1142,10 +511,9 @@ esp_err_t data_logger_write(dl_param_t param, double value)
     struct timeval tv;
 
     gettimeofday(&tv, NULL);
-    return data_logger_write_at(param,
-                                (int64_t)tv.tv_sec * 1000 +
-                                    tv.tv_usec / 1000,
-                                value);
+    return param_push(param,
+                      (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000,
+                      value, 0);
 }
 
 /* autopid value sink: main wires it to autopid_set_value_sink().
@@ -1181,41 +549,28 @@ esp_err_t data_logger_stats(data_logger_stats_t *out)
     }
 
     *out = s_stats;
+    dl_writer_stats(out);   /* the streams and the storage counters */
 
-    /* param stream */
-    snprintf(out->file, sizeof(out->file), "%s", s_stream[ST_PARAM].file);
-    out->file_rows = s_stream[ST_PARAM].file_rows;
-    out->files = s_stream[ST_PARAM].files;
-    out->rotations = s_stream[ST_PARAM].rotations;
-    out->written = s_stream[ST_PARAM].written;
     out->queued = s_param_ring.fill;
     out->dropped = s_param_ring.dropped;
-
-    /* CAN stream */
-    snprintf(out->can_file, sizeof(out->can_file), "%s",
-             s_stream[ST_CAN].file);
-    out->can_file_rows = s_stream[ST_CAN].file_rows;
-    out->can_files = s_stream[ST_CAN].files;
-    out->can_rotations = s_stream[ST_CAN].rotations;
-    out->frames_written = s_stream[ST_CAN].written;
     out->can_queued = s_frame_ring.fill + dl_can_queued();
     out->frames_dropped = s_frame_ring.dropped;
+    out->paused = dl_writer_gated();
 
-    out->paused = !s_gate;
+    /* the clock */
+    dl_clock_stats_t cs;
+
+    dl_journal_stats(&cs);
+    out->clock_valid = cs.valid;
+    snprintf(out->clock_source, sizeof(out->clock_source), "%s",
+             dl_clock_source_name(cs.source));
+    out->clock_steps = cs.steps_this_boot;
+    out->clock_rotations = cs.rotations_by_clock;
+    out->journal_bytes = cs.journal_bytes;
     return ESP_OK;
 }
 
 void dl_runtime_gate(bool on)
 {
-    if (s_gate != on)
-    {
-        ESP_LOGI(TAG, "%s by rule", on ? "enabled" : "paused");
-    }
-
-    s_gate = on;
-
-    if (s_task != NULL)
-    {
-        xTaskNotifyGive(s_task);   /* wake the writer out of its nap */
-    }
+    dl_writer_set_gate(on);
 }

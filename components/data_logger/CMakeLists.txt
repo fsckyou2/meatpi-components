@@ -1,5 +1,7 @@
 idf_component_register(
     SRCS "data_logger.c"
+         "data_logger_writer.c"
+         "data_logger_store.c"
          "data_logger_settings.c"
          "data_logger_db.c"
          "data_logger_append.c"
@@ -7,6 +9,8 @@ idf_component_register(
          "data_logger_blf.c"
          "data_logger_can.c"
          "data_logger_files.c"
+         "data_logger_clock.c"
+         "data_logger_journal.c"
          "data_logger_events.c"
          "data_logger_http.c"
          "data_logger_cli.c"
@@ -18,10 +22,11 @@ idf_component_register(
     # see BENCHMARKS.md for why the pragmas look the way they do). Two
     # streams: params (autopid sink + logger.write rules) and CAN frames
     # (can_manager RX subscription, hence the can_manager dep; autopid
-    # stays decoupled, main wires its value sink). /api/logger and the
-    # `logger` command are optional (main wires them).
+    # stays decoupled, main wires its value sink). The clock journal reads
+    # rtc_manager's clock steps and the restart tracker's boot count.
+    # /api/logger and the `logger` command are optional (main wires them).
     PRIV_REQUIRES sqlite3 external_storage event_manager dev_status_manager
-                  esp_timer
+                  esp_timer rtc_manager restart_tracker
                   http_server_manager settings_manager log_manager
                   cmdline_manager can_manager
 )

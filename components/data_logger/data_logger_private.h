@@ -29,6 +29,14 @@
  * (`dl_<epoch>.<ext>`) and raw CAN frames (`can_<epoch>.<ext>`), each
  * with its own engine choice, rotation and retention. Engines take a
  * context pointer so two files can be open at once.
+ *
+ * The clock (2026-10-13, issue #984): every record carries the monotonic
+ * time it was taken at beside its wall stamp. The writer re-bases the
+ * wall stamp of records queued before a clock step (rtc_manager counts
+ * the steps), the relative formats take their time from the monotonic
+ * clock, and the journal `/sd/logs/clock.jsonl` says what the clock did
+ * and which files were open. data_logger_clock.c holds the pure rules,
+ * data_logger_journal.c the writer-side glue.
  */
 #pragma once
 
@@ -57,19 +65,28 @@
 #define DL_QUICKCHECK_MAX (8u * 1024u * 1024u)  /* resume-time quick_check bound (B) */
 #define DL_BYTES_PER_ROW   26 /* measured: 100 KB / 4000 rows          */
 #define DL_BYTES_PER_FRAME 44 /* sqlite frames-table size estimate     */
+/* the PSRAM .noinit envelope's layout version: 2 since the record grew
+ * its monotonic stamp (2026-10-13); a version-1 ring is discarded once */
+#define DL_PS_VERSION 2u
 
 /* record kinds */
 #define DL_REC_PARAM 0
 #define DL_REC_FRAME 1
 
+/* record flags (dl_record_t.flags) */
+#define DL_REC_ABS 0x01  /* an explicit stamp (data_logger_write_at, a
+                            record salvaged from before a reset): never
+                            re-based after a clock step */
+
 /* frame flag bits (dl_record_t.u.f.flags and the .wdl 0x03 id word) */
 #define DL_FRAME_EXT 0x01
 #define DL_FRAME_RTR 0x02
 
-/* one queued record (PSRAM rings; 24 bytes) */
+/* one queued record (PSRAM rings; 32 bytes on the S3 and on the host:
+ * the stamp and the flags sit in what used to be padding) */
 typedef struct
 {
-    int64_t ts_ms;
+    int64_t ts_ms;               /* wall clock, epoch ms, at production */
     union
     {
         struct
@@ -85,8 +102,13 @@ typedef struct
             uint8_t  flags;      /* DL_FRAME_EXT / DL_FRAME_RTR       */
         } f;
     } u;
-    uint8_t kind;                /* DL_REC_PARAM / DL_REC_FRAME       */
+    uint8_t  kind;               /* DL_REC_PARAM / DL_REC_FRAME       */
+    uint8_t  flags;              /* DL_REC_*                          */
+    uint32_t mono_ms;            /* esp_timer ms at production (wraps
+                                    at 49.7 days: compared modulo)    */
 } dl_record_t;
+
+_Static_assert(sizeof(dl_record_t) == 32, "dl_record_t must stay 32 bytes");
 
 /* RAM param registry entry; db_id is per-open-file (re-interned lazily
  * after every open/rotate, 0 = not yet interned into this file) */
@@ -97,6 +119,95 @@ typedef struct
     char name[DL_NAME_MAX];
     int  db_id;
 } dl_param_entry_t;
+
+/* ---- the clock (data_logger_clock.c: PURE, host-tested) --------------------- */
+
+#define DL_CLOCK_ROTATE_MS  60000   /* a step this big rotates the files */
+#define DL_CLOCK_STEPS_KEEP 8       /* steps kept for re-basing          */
+#define DL_JOURNAL_NAME     "clock.jsonl"
+#define DL_JOURNAL_MAX      (64u * 1024u)  /* above this ...             */
+#define DL_JOURNAL_KEEP     (32u * 1024u)  /* ... the newest part stays  */
+
+/* one set of the system clock as rtc_manager measured it (its source
+ * numbering: 0 none, 1 rtc, 2 sntp, 3 manual) */
+typedef struct
+{
+    uint32_t generation;
+    uint32_t mono_ms;            /* when it happened (esp_timer ms)   */
+    int64_t  delta_ms;           /* new wall - old wall               */
+    int64_t  wall_ms;            /* the wall clock right after it     */
+    uint8_t  source;
+} dl_clock_step_t;
+
+/* add the delta of every step that happened AFTER the record was taken
+ * (modulo-32 comparison of the monotonic stamps); DL_REC_ABS records are
+ * left alone. Returns the number of steps applied. */
+int dl_clock_rebase(dl_record_t *rec, const dl_clock_step_t *steps, int n);
+/* a record's time relative to a file's open, for the single-use formats:
+ * from the monotonic stamps (a wall step cannot make it negative or
+ * non-monotonic), from the wall stamps for DL_REC_ABS records */
+int64_t dl_clock_rel_ms(const dl_record_t *rec, int64_t start_ms,
+                        uint32_t mono_open_ms);
+/* the open time of a file as the wall clock says NOW (the header start
+ * of mf4/blf is re-patched with it at every commit) */
+int64_t dl_clock_start_ms(int64_t wall_now_ms, uint32_t mono_now_ms,
+                          uint32_t mono_open_ms);
+/* the first valid clock of a boot and any step of DL_CLOCK_ROTATE_MS or
+ * more rotate the files; smaller steps are journaled only */
+bool dl_clock_rotates(const dl_clock_step_t *step, bool first_valid);
+const char *dl_clock_source_name(uint8_t source);
+
+/* journal lines (one JSON object per line, byte-exact in the host test) */
+int dl_journal_boot_line(char *out, size_t cap, uint32_t boot,
+                         int64_t ts_ms, uint32_t up_ms, bool valid,
+                         uint8_t source);
+int dl_journal_step_line(char *out, size_t cap, const char *ev,
+                         uint32_t boot, const dl_clock_step_t *step,
+                         const char *const *files, int nfiles);
+int dl_journal_rotate_line(char *out, size_t cap, uint32_t boot,
+                           int64_t ts_ms, const char *stream,
+                           const char *from, const char *to);
+/* the byte offset inside the kept tail of an oversized journal where the
+ * first whole line starts (the tail is cut there) */
+size_t dl_journal_trim_offset(const char *tail, size_t len);
+
+/* in-band markers where a format has room for one */
+int    dl_jsonl_step_row(char *out, size_t cap, const dl_clock_step_t *step);
+int    dl_csv_step_row(char *out, size_t cap, const dl_clock_step_t *step);
+#define DL_WDL_STEP_LEN 18   /* u8 0x04 | i64 ts_ms | i64 delta_ms | u8 source */
+size_t dl_wdl_encode_step(uint8_t *buf, const dl_clock_step_t *step);
+
+/* ---- the journal and the writer-side clock glue (data_logger_journal.c) ---
+   Writer task only. The first lap takes the clock's generation as found
+   (the boot restore predates every file of this boot); every later step
+   is journaled, marked in the open files, and rotates them when it is the
+   first valid clock of the boot or 60 s or more. */
+
+typedef struct
+{
+    bool     valid;
+    uint8_t  source;
+    uint32_t steps_this_boot;    /* rtc_manager's count                */
+    uint32_t rotations_by_clock;
+    uint32_t journal_bytes;
+} dl_clock_stats_t;
+
+void dl_journal_set_boot(uint32_t boot);   /* the restart tracker's count */
+void dl_journal_lap(void);                 /* before every batch         */
+void dl_journal_rebase(dl_record_t *rec);  /* on every popped record     */
+void dl_journal_stats(dl_clock_stats_t *out);
+
+/* what the journal needs from the writer (data_logger.c) */
+typedef struct
+{
+    const char *stream;          /* "params" / "can"                   */
+    char        from[48];
+    char        to[48];          /* "" when the new file did not open  */
+} dl_rotated_t;
+
+int  dl_writer_open_files(const char **names, int cap);
+int  dl_writer_clock_rotate(const dl_clock_step_t *step, dl_rotated_t out[2]);
+void dl_writer_clock_mark(const dl_clock_step_t *step);
 
 /* ---- storage engines (writer task ONLY) ----------------------------------
 
@@ -127,6 +238,12 @@ typedef struct
     /* optional: never resume a file bigger than this (0 = no limit); the
      * .wdl torn-tail check is a full read, so huge CAN logs start fresh */
     uint64_t  resume_max;
+    /* optional (2026-10-13): an in-band clock-step marker, made durable
+     * by the call itself (outside any batch). mark_close_only = only as
+     * the LAST record before a close (.wdl: a reader that does not know
+     * the record type stops there as at a torn tail, nothing lost) */
+    esp_err_t (*mark)(void *ctx, const dl_clock_step_t *step);
+    bool      mark_close_only;
 } dl_engine_t;
 
 extern const dl_engine_t dl_engine_sqlite;   /* data_logger_db.c     */
@@ -157,7 +274,8 @@ typedef struct
     uint16_t next_id;            /* .wdl dictionary ids               */
     uint8_t  fmt;                /* DL_AP_*                           */
     bool     frames;             /* header/row shape at open          */
-    int64_t  start_ms;           /* asc: rows are relative to open    */
+    int64_t  start_ms;           /* asc: the header date (wall)       */
+    uint32_t mono_open;          /* asc: rows are relative to this    */
 } dl_append_ctx_t;
 
 typedef struct                   /* MDF 4.10 (data_logger_mf4.c)      */
@@ -165,7 +283,8 @@ typedef struct                   /* MDF 4.10 (data_logger_mf4.c)      */
     void    *f;
     uint64_t bytes;
     uint64_t records;
-    int64_t  start_ms;
+    int64_t  start_ms;           /* the header start as last patched  */
+    uint32_t mono_open;          /* records are relative to this      */
     uint32_t dt_len_off;         /* patch targets (commit)            */
     uint32_t cg_cycle_off;
     char    *buf;                /* lazy 4 KB DMA stdio buffer        */
@@ -177,8 +296,9 @@ typedef struct                   /* Vector BLF (data_logger_blf.c)    */
     uint64_t bytes;              /* file bytes incl. the 144 B header */
     uint64_t uncomp;             /* sum of container payload bytes    */
     uint32_t objects;            /* CAN_MESSAGE count                 */
-    int64_t  start_ms;
-    int64_t  last_ms;
+    int64_t  start_ms;           /* the header start as last patched  */
+    uint32_t mono_open;          /* messages are relative to this     */
+    int64_t  last_rel_ms;        /* the newest message's offset       */
     uint32_t cfill;              /* container accumulation fill       */
     char    *buf;                /* lazy 4 KB DMA stdio buffer        */
 } dl_blf_ctx_t;
@@ -241,11 +361,80 @@ esp_err_t dl_settings_register(void);
 
 /** Boot-applied config; valid once dl_settings_is_configured(). */
 const dl_cfg_t *dl_settings_config(void);
-bool dl_settings_is_configured(void); /* boot apply ran (standard §4.3) */
+bool dl_settings_is_configured(void); /* boot apply ran (standard 4.3) */
 
 /** Apply-time engine/stream re-bind: data_logger.c owns the stream
  *  table and the rings; on_apply calls this after parsing. */
 void dl_core_apply(const dl_cfg_t *cfg);
+
+/* ---- the writer's streams (data_logger_writer.c) and the card-side file
+   operations on them (data_logger_store.c) --------------------------------
+   One stream per record kind, bound to an engine + context at boot
+   (`format` / `can_format`) and fed by the core's ring of that kind. The
+   writer task drains the rings into the open files in batches; the store
+   opens or resumes a stream's file, rotates it, ages the old ones out,
+   sets a corrupt one aside and latches the faults. Writer task only. */
+
+enum { DL_ST_PARAM = 0, DL_ST_CAN = 1, DL_ST_COUNT = 2 };
+
+typedef struct
+{
+    const dl_engine_t *eng;
+    void              *ctx;
+    const char        *prefix;    /* DL_PREFIX_PARAM / DL_PREFIX_CAN  */
+    bool               frames;    /* record kind this stream carries  */
+    bool               active;    /* logging this stream this boot    */
+    uint32_t           max_mb;
+    uint32_t           max_files;
+    char               cur_path[80];
+    /* per-stream stats */
+    char               file[48];
+    uint32_t           file_rows;
+    uint32_t           files;
+    uint32_t           rotations;
+    uint32_t           written;
+    /* ROBUSTNESS.md */
+    uint32_t           open_fails;    /* consecutive open failures        */
+    uint32_t           corrupt_files; /* *.corrupt set aside for this stream */
+    char               last_try[48];  /* file name of the last open attempt */
+} dl_stream_t;
+
+/* the storage counters the writer and the store share */
+typedef struct
+{
+    bool     storage_ok;         /* card mounted and the active files open */
+    uint32_t errors;             /* storage errors since boot (both streams) */
+    uint32_t corrupt;            /* *.corrupt files set aside on the card  */
+} dl_store_stats_t;
+
+/* data_logger_store.c */
+#define DL_OPEN_FAILS_FAULT 3   /* consecutive open failures that latch a fault */
+esp_err_t dl_store_open(dl_stream_t *st, bool force_new); /* the newest, or fresh */
+void      dl_store_close(dl_stream_t *st);
+void      dl_store_rotate(dl_stream_t *st);   /* close, a fresh file, the event */
+bool      dl_store_ensure_open(dl_stream_t *st); /* a corrupt file is set aside on
+                                                    the spot; repeated failures
+                                                    latch a fault */
+void      dl_store_quarantine(dl_stream_t *st);
+void      dl_store_fault(const char *code, const char *detail); /* an internal-
+                                                    stack task latches it */
+dl_store_stats_t *dl_store_stats(void);
+
+/* data_logger_writer.c */
+void        dl_writer_bind(const dl_cfg_t *cfg);  /* engines, limits, active streams */
+esp_err_t   dl_writer_start(void);                /* the task (+ the CAN front end) */
+void        dl_writer_stop(void);                 /* synchronous: files flushed, closed */
+void        dl_writer_set_gate(bool on);          /* the runtime gate; wakes the writer */
+bool        dl_writer_gated(void);
+bool        dl_writer_stream_active(int st);
+const char *dl_writer_engine_name(int st);        /* "jsonl", "mf4", ...            */
+void        dl_writer_stats(data_logger_stats_t *out); /* the stream + storage fields */
+
+/* the core's rings and registry as the writer sees them (data_logger.c) */
+bool              dl_core_pop(int st, dl_record_t *rec);
+uint32_t          dl_core_fill(int st);
+dl_param_entry_t *dl_core_param(int idx);
+void              dl_core_forget_db_ids(void);  /* after every open of the params file */
 
 /* ---- recovery helpers (data_logger_recover.c: PURE, host-tested) ---------- */
 size_t   dl_recover_text_keep(const char *buf, size_t len);
@@ -297,10 +486,9 @@ int dl_csv_frame_row(char *out, size_t cap, int64_t ts_ms, uint32_t id,
 /* candump "(sec.usec) can0 ID#DATA\n" (can-utils / SavvyCAN) */
 int dl_candump_row(char *out, size_t cap, int64_t ts_ms, uint32_t id,
                    uint8_t flags, const uint8_t *data, uint8_t dlc);
-/* Vector .asc data row (seconds relative to start_ms, channel 1) */
-int dl_asc_row(char *out, size_t cap, int64_t start_ms, int64_t ts_ms,
-               uint32_t id, uint8_t flags, const uint8_t *data,
-               uint8_t dlc);
+/* Vector .asc data row (rel_ms = ms since the file's open, channel 1) */
+int dl_asc_row(char *out, size_t cap, int64_t rel_ms, uint32_t id,
+               uint8_t flags, const uint8_t *data, uint8_t dlc);
 /* JSON-lines rows */
 int dl_jsonl_param_row(char *out, size_t cap, int64_t ts_ms,
                        const char *source, const char *name,
@@ -313,15 +501,19 @@ int dl_jsonl_frame_row(char *out, size_t cap, int64_t ts_ms,
 
 #define DL_MF4_PRELUDE_MAX 2048
 #define DL_MF4_REC_SIZE    22
+/* where the prelude keeps the start time (ns since the epoch, u64 LE):
+ * the HD block's and the FH block's; commit() re-patches both when the
+ * wall clock moved after the open */
+#define DL_MF4_HD_START_OFF 136
+#define DL_MF4_FH_START_OFF 208
 
 /* ID..CN..DT-header prelude; returns total length and the two file
  * offsets commit() patches (DT block length u64, CG cycle_count u64) */
 size_t dl_mf4_prelude(uint8_t *buf, size_t cap, int64_t start_ms,
                       uint32_t *dt_len_off, uint32_t *cg_cycle_off);
 /* one 22-byte record: t f64 (s since start) | id u32 | flags u8 |
- * dlc u8 | data[8] */
-size_t dl_mf4_record(uint8_t *buf, int64_t start_ms,
-                     const dl_record_t *rec);
+ * dlc u8 | data[8]; rel_ms = the record's ms since the file's open */
+size_t dl_mf4_record(uint8_t *buf, int64_t rel_ms, const dl_record_t *rec);
 
 /* ---- Vector BLF builders (pure, little-endian) ----------------------------- */
 
@@ -335,9 +527,9 @@ size_t dl_blf_file_header(uint8_t *buf, int64_t start_ms, int64_t end_ms,
                           uint32_t objects);
 /* LOG_CONTAINER header for an UNCOMPRESSED payload of payload_len */
 size_t dl_blf_container_header(uint8_t *buf, uint32_t payload_len);
-/* one 48-byte CAN_MESSAGE object (ns timestamp relative to start_ms) */
-size_t dl_blf_message(uint8_t *buf, int64_t start_ms,
-                      const dl_record_t *rec);
+/* one 48-byte CAN_MESSAGE object (ns timestamp = rel_ms since the start,
+ * clamped at 0: the format's timestamp is unsigned) */
+size_t dl_blf_message(uint8_t *buf, int64_t rel_ms, const dl_record_t *rec);
 
 /* ---- glue ----------------------------------------------------------------- */
 

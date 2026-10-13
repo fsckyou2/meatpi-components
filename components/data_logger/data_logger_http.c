@@ -47,7 +47,7 @@ static const char *TAG = "data_logger";
 static esp_err_t logger_handler(httpd_req_t *req)
 {
     data_logger_stats_t st;
-    char body[640];
+    char body[896];
 
     (void)data_logger_stats(&st);
     snprintf(body, sizeof(body),
@@ -62,6 +62,10 @@ static esp_err_t logger_handler(httpd_req_t *req)
              "\"frames_written\":%lu,\"frames_dropped\":%lu,"
              "\"rotations\":%lu},"
              "\"salvaged\":%lu,\"corrupt\":%lu,"
+             "\"clock\":{\"valid\":%s,\"source\":\"%s\","
+             "\"steps_this_boot\":%lu,\"rotations_by_clock\":%lu,"
+             "\"journal_bytes\":%lu,\"journal\":\"/sd/logs/"
+             DL_JOURNAL_NAME "\"},"
              "\"dir\":\"/sd/logs\"}",
              st.enabled ? "true" : "false",
              st.running ? "true" : "false",
@@ -80,7 +84,11 @@ static esp_err_t logger_handler(httpd_req_t *req)
              (unsigned long)st.frames_written,
              (unsigned long)st.frames_dropped,
              (unsigned long)st.can_rotations,
-             (unsigned long)st.salvaged, (unsigned long)st.corrupt);
+             (unsigned long)st.salvaged, (unsigned long)st.corrupt,
+             st.clock_valid ? "true" : "false", st.clock_source,
+             (unsigned long)st.clock_steps,
+             (unsigned long)st.clock_rotations,
+             (unsigned long)st.journal_bytes);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
@@ -228,6 +236,26 @@ static bool export_line_matches(const char *line, size_t len,
 
     return vlen > nlen && p[vlen - nlen - 1] == '.' &&
            memcmp(p + vlen - nlen, name, nlen) == 0;
+}
+
+/* the in-band clock-step marker (2026-10-13): not a record, never a point
+ * for a consumer of this route (the journal and the file itself keep it) */
+static bool export_line_is_marker(const char *line, size_t len, bool csv)
+{
+    static const char JSONL[] = "\"event\":\"clock_step\"";
+    static const char CSV[] = ",logger.clock_step,";
+    const char *key = csv ? CSV : JSONL;
+    size_t klen = (csv ? sizeof(CSV) : sizeof(JSONL)) - 1;
+
+    for (size_t i = 0; i + klen <= len; i++)
+    {
+        if (line[i] == key[0] && memcmp(line + i, key, klen) == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static int export_list_epochs(int64_t *out, int cap, const char *ext)
@@ -416,6 +444,14 @@ static esp_err_t export_get_handler(httpd_req_t *req)
         fseek(f, 0, SEEK_END);
         long fsize = ftell(f);
 
+        /* which file the rows that follow come from (2026-10-13): a
+           consumer with the clock journal re-bases them per file */
+        char flin[64];
+        int fn = snprintf(flin, sizeof(flin), "{\"_file\":\"%s\"}\n", fname);
+
+        httpd_resp_send_chunk(req, flin, fn);
+        bytes_left -= fn;
+
         while (lines_left > 0 && bytes_left > 0 && scan_left > 0 &&
                off < fsize)
         {
@@ -458,8 +494,9 @@ static esp_err_t export_get_handler(httpd_req_t *req)
                 const char *line = buf + consumed;
                 size_t len = i + 1 - consumed;
 
-                if (name[0] == '\0' ||
-                    export_line_matches(line, len, name, csv))
+                if (!export_line_is_marker(line, len, csv) &&
+                    (name[0] == '\0' ||
+                     export_line_matches(line, len, name, csv)))
                 {
                     if ((int)len > bytes_left && lines_left < limit)
                     {

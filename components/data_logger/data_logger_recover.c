@@ -95,6 +95,10 @@ size_t dl_recover_wdl_scan(const uint8_t *buf, size_t len, bool *bad)
 
             need = 14 + buf[off + 13];
         }
+        else if (t == 0x04)          /* clock step: type, i64 ts, i64 delta, u8 */
+        {
+            need = DL_WDL_STEP_LEN;
+        }
         else
         {
             if (bad != NULL)
@@ -162,7 +166,8 @@ bool dl_recover_record_sane(const dl_record_t *r)
 {
     /* random PSRAM almost never lands inside these ranges; the clock may
        be unset (1970) so the floor is 0, the ceiling is year 2096 */
-    if (r == NULL || r->ts_ms < 0 || r->ts_ms > 4000000000000LL)
+    if (r == NULL || r->ts_ms < 0 || r->ts_ms > 4000000000000LL ||
+        (r->flags & (uint8_t)~DL_REC_ABS) != 0)
     {
         return false;
     }

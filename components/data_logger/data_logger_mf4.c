@@ -35,6 +35,12 @@
  * power cut loses at most the last batch: no UNFINALIZED-recovery
  * dance. single_use: the master time channel is relative to the file
  * start, so files never resume across opens.
+ *
+ * The clock (2026-10-13): records are relative to the open by the
+ * monotonic clock, and the header's start time is re-patched at every
+ * commit from the wall clock as it is NOW, so a file whose clock was
+ * set or stepped while it was open carries the corrected start and
+ * right relative times.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -43,6 +49,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include <unistd.h>
 
 #include "data_logger_private.h"
@@ -50,6 +57,19 @@
 static const char *TAG = "data_logger";
 
 #define MF4_BUF_SZ 4096
+
+static int64_t wall_ms_now(void)
+{
+    struct timeval tv;
+
+    gettimeofday(&tv, NULL);
+    return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+static uint32_t mono_ms_now(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
 
 static esp_err_t mf4_open(void *ctx, const char *path, bool frames)
 {
@@ -95,10 +115,8 @@ static esp_err_t mf4_open(void *ctx, const char *path, bool frames)
 
     setvbuf(f, c->buf, _IOFBF, MF4_BUF_SZ);
 
-    struct timeval tv;
-
-    gettimeofday(&tv, NULL);
-    c->start_ms = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    c->mono_open = mono_ms_now();
+    c->start_ms = wall_ms_now();
 
     size_t n = dl_mf4_prelude(pre, DL_MF4_PRELUDE_MAX, c->start_ms,
                               &c->dt_len_off, &c->cg_cycle_off);
@@ -120,12 +138,17 @@ static esp_err_t mf4_open(void *ctx, const char *path, bool frames)
     return ESP_OK;
 }
 
+static esp_err_t mf4_patch_start(dl_mf4_ctx_t *c, FILE *f);
+
 static void mf4_close(void *ctx)
 {
     dl_mf4_ctx_t *c = ctx;
 
     if (c->f != NULL)
     {
+        /* a clock step rotates the file without a batch in between: the
+           header's start follows the corrected clock at the close too */
+        (void)mf4_patch_start(c, (FILE *)c->f);
         fclose((FILE *)c->f);
         c->f = NULL;
     }
@@ -161,7 +184,8 @@ static esp_err_t mf4_write(void *ctx, const dl_record_t *rec,
     }
 
     uint8_t r[DL_MF4_REC_SIZE];
-    size_t n = dl_mf4_record(r, c->start_ms, rec);
+    size_t n = dl_mf4_record(r, dl_clock_rel_ms(rec, c->start_ms,
+                                                c->mono_open), rec);
 
     if (fwrite(r, 1, n, (FILE *)c->f) != n)
     {
@@ -181,6 +205,34 @@ static void put_u64_local(uint8_t *b, uint64_t v)
     }
 }
 
+/* the start time as the wall clock says now: unchanged while the clock
+ * holds (within the ms rounding of two clocks), moved by every step */
+static esp_err_t mf4_patch_start(dl_mf4_ctx_t *c, FILE *f)
+{
+    int64_t start = dl_clock_start_ms(wall_ms_now(), mono_ms_now(),
+                                      c->mono_open);
+
+    if (start - c->start_ms < 2 && c->start_ms - start < 2)
+    {
+        return ESP_OK;
+    }
+
+    uint8_t v[8];
+
+    put_u64_local(v, (uint64_t)start * 1000000ULL);
+
+    if (fseek(f, DL_MF4_HD_START_OFF, SEEK_SET) != 0 ||
+        fwrite(v, 1, 8, f) != 8 ||
+        fseek(f, DL_MF4_FH_START_OFF, SEEK_SET) != 0 ||
+        fwrite(v, 1, 8, f) != 8)
+    {
+        return ESP_FAIL;
+    }
+
+    c->start_ms = start;
+    return ESP_OK;
+}
+
 static esp_err_t mf4_commit(void *ctx)
 {
     dl_mf4_ctx_t *c = ctx;
@@ -191,8 +243,14 @@ static esp_err_t mf4_commit(void *ctx)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* patch DT block length + CG cycle count, back to the tail */
+    /* patch the start time, the DT block length + CG cycle count, back
+       to the tail */
     uint8_t v[8];
+
+    if (mf4_patch_start(c, f) != ESP_OK)
+    {
+        return ESP_FAIL;
+    }
 
     put_u64_local(v, 24 + c->records * DL_MF4_REC_SIZE);
 

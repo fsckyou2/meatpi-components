@@ -100,6 +100,12 @@ typedef struct
     /* robustness (2026-09-07, ROBUSTNESS.md) */
     uint32_t salvaged;           /**< records carried over a warm reset      */
     uint32_t corrupt;            /**< *.corrupt files set aside on the card   */
+    /* the clock (2026-10-13, issue #984; README "Time") */
+    bool     clock_valid;        /**< the system clock was set this boot     */
+    char     clock_source[8];    /**< none / rtc / sntp / manual             */
+    uint32_t clock_steps;        /**< sets of the system clock this boot     */
+    uint32_t clock_rotations;    /**< files rotated because the clock moved  */
+    uint32_t journal_bytes;      /**< /sd/logs/clock.jsonl as last written   */
 } data_logger_stats_t;
 
 /** Register descriptors (settings/log/events). No storage access. */
@@ -118,11 +124,13 @@ esp_err_t data_logger_register_param(const char *source, const char *name,
                                      dl_param_t *out);
 
 /** Queue one record stamped with the current system time (rtc_manager
- *  restores the clock at boot, so epochs are sane). Never blocks;
- *  ESP_ERR_INVALID_STATE when the logger is disabled. */
+ *  restores the clock at boot, so epochs are sane; a record queued
+ *  before a clock step is re-based by the writer, README "Time").
+ *  Never blocks; ESP_ERR_INVALID_STATE when the logger is disabled. */
 esp_err_t data_logger_write(dl_param_t param, double value);
 
-/** Same with an explicit timestamp (epoch milliseconds). */
+/** Same with an explicit timestamp (epoch milliseconds): the producer's
+ *  word, never re-based after a clock step. */
 esp_err_t data_logger_write_at(dl_param_t param, int64_t epoch_ms,
                                double value);
 

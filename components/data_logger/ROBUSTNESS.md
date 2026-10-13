@@ -39,8 +39,8 @@ on the card. The table below says what happens to each place per case.
 | 9 | Card removed while logging | writer parks, rings keep absorbing (drop-oldest), resumes on mount | unchanged | ring overflow while the card is out |
 | 10 | Card full / persistent write errors | errors counted, handle dropped, retried every 2 s (log spam) | same, plus after 3 consecutive open failures a `logger_storage_error` fault and a 10 s back-off | new records once the ring overflows |
 | 11 | FAT-level corruption / mount failure | external_storage reports no card; writer parks | unchanged: nothing the logger does runs on the boot path (the writer task is asynchronous), so a bad card never stops the boot | everything until the card is fixed |
-| 12 | Clock not set / stepped | monotonic names (`epoch+1`) | unchanged; salvage accepts `ts` from 0 | none |
-| 13 | EN-pin reset / flash on the bench | - | PSRAM keeps most bytes but with bit errors: the envelope's CRC rejects it and the logger starts clean (seen: restart_tracker reports a fresh state after every EN reset) | queued records (as case 1–3) |
+| 12 | Clock not set / stepped | monotonic names (`epoch+1`); rows at 1970 + uptime until SNTP, then every later row jumped; the relative formats went negative on a backward step; nothing said so | (2026-10-13, issue #984, README "Time") every record carries its monotonic stamp, the writer re-bases the rows queued before a step, the relative formats take their time from the monotonic clock, the first valid clock and any step of a minute or more rotate the files (a boot without a clock never resumes a synced file), the clock journal `/sd/logs/clock.jsonl` and the in-band markers say what happened, `tools/log_clock.py` re-bases old files from it | rows written before the first valid clock keep 1970 + uptime (journaled); a device that never syncs cannot be re-based |
+| 13 | EN-pin reset / flash on the bench | - | PSRAM keeps most bytes but with bit errors: the envelope's CRC rejects it and the logger starts clean (seen: restart_tracker reports a fresh state after every EN reset) | queued records (as cases 1 to 3) |
 
 ## Fewer writes
 
@@ -49,7 +49,7 @@ or `flush_ms`. `flush_ms` now defaults to **5000 ms** (was 1000): five
 times fewer commits, and with case 1 fixed each commit is one journal
 write + two fsyncs, so the card sees far fewer, larger, atomic writes.
 The trade: a power cut costs up to 5 s of samples; a crash or a restart
-costs nothing (cases 6–8). The param ring grew to 2048 records so a
+costs nothing (cases 6 to 8). The param ring grew to 2048 records so a
 5 s batch at the fastest autopid rate is a small fraction of it.
 
 ## Two rules learned on the bench (2026-09-07)
@@ -57,7 +57,7 @@ costs nothing (cases 6–8). The param ring grew to 2048 records so a
 - **No flash writes from the writer task.** Its stack is in PSRAM; a
   flash write turns the cache off and the stack with it (the
   `cache_utils.c:126` assert). Fault codes are latched from a short-lived
-  internal-stack task (`raise_fault_async`), never inline.
+  internal-stack task (`dl_store_fault`, data_logger_store.c), never inline.
 - **Trust nothing that answers nothing.** With `SQLITE_OMIT_INTEGRITY_CHECK`
   in the port, `PRAGMA quick_check` returned no row and the first build
   set every good file aside. The port now builds the check, yet it still

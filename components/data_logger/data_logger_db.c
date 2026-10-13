@@ -38,7 +38,8 @@
  * retrying it (that loop dropped every record on the bench).
  *
  * Schema: params(id, source, name UNIQUE) + records(ts, param_id,
- * value REAL) + frames(ts, id, ext, rtr, dlc, data BLOB), ts-indexed.
+ * value REAL) + frames(ts, id, ext, rtr, dlc, data BLOB), ts-indexed,
+ * + clock_steps(ts, delta_ms, source) (2026-10-13: the in-band marker).
  * NOTE the measured ~700 rows/s ceiling: sqlite for the CAN stream is
  * a filtered/slow-bus choice, not a busy-bus one (README).
  */
@@ -143,7 +144,11 @@ static esp_err_t sq_tables(sqlite3 *db)
                 "ts INTEGER, param_id INTEGER, value REAL);") != ESP_OK ||
         dl_exec(db, "CREATE TABLE IF NOT EXISTS frames ("
                 "ts INTEGER, id INTEGER, ext INTEGER, rtr INTEGER, "
-                "dlc INTEGER, data BLOB);") != ESP_OK)
+                "dlc INTEGER, data BLOB);") != ESP_OK ||
+        /* the clock stepped while the file was open (2026-10-13): rows
+           with ts <= the step's ts - delta_ms were stamped on the old clock */
+        dl_exec(db, "CREATE TABLE IF NOT EXISTS clock_steps ("
+                "ts INTEGER, delta_ms INTEGER, source TEXT);") != ESP_OK)
     {
         return ESP_FAIL;
     }
@@ -566,6 +571,37 @@ static uint64_t sq_bytes(void *ctx)
            c->frame_rows * DL_BYTES_PER_FRAME;
 }
 
+/* a row in clock_steps, its own transaction (called between batches) */
+static esp_err_t sq_mark(void *ctx, const dl_clock_step_t *step)
+{
+    dl_sq_ctx_t *c = ctx;
+    char sql[128];
+
+    if (c->db == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO clock_steps (ts, delta_ms, source) "
+             "VALUES (%lld, %lld, '%s');",
+             (long long)step->wall_ms, (long long)step->delta_ms,
+             dl_clock_source_name(step->source));
+
+    if (sq_exec(c, "BEGIN;") != ESP_OK)
+    {
+        return ESP_FAIL;
+    }
+
+    if (sq_exec(c, sql) != ESP_OK)
+    {
+        (void)sq_exec(c, "ROLLBACK;");
+        return ESP_FAIL;
+    }
+
+    return sq_exec(c, "COMMIT;");
+}
+
 const dl_engine_t dl_engine_sqlite =
 {
     .ext = ".db",
@@ -577,6 +613,7 @@ const dl_engine_t dl_engine_sqlite =
     .write = sq_write,
     .commit = sq_commit,
     .bytes = sq_bytes,
+    .mark = sq_mark,
 };
 
 /* ---- salvage (ROBUSTNESS.md case 5) -------------------------------------------

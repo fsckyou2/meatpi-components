@@ -24,7 +24,7 @@
  * @file data_logger_append.c
  * @brief The two append-log storage engines (meatpi 2026-07-07: sqlite
  *        stays for tooling compatibility, these are the fast options,
- *        BENCHMARKS.md measured raw append at ~170× tuned sqlite).
+ *        BENCHMARKS.md measured raw append at ~170x tuned sqlite).
  *
  * Engines take a dl_append_ctx_t since 2026-07-09 so the param and CAN
  * streams can have two files open at once (TASK addendum A1).
@@ -35,11 +35,16 @@
  *          0x01 def:   u16 id, u8 len, "source.name" (first use only)
  *          0x02 param: i64 ts_ms, u16 id, f64 value  (little-endian)
  *          0x03 frame: i64 ts_ms, u32 id_word, u8 dlc, data[dlc]
+ *          0x04 clock: i64 ts_ms, i64 delta_ms, u8 source (2026-10-13:
+ *               the clock stepped here; only ever the last record of a
+ *               file, so an older reader stops at it as at a torn tail)
  *        Self-contained (the dictionary is inline); a torn tail frame
  *        is detectable by framing. Decoder: tools/wdl_dump.py.
  *
  * Both buffer and fflush+fsync only on commit(), so a batch costs one
- * card touch like a sqlite transaction does.
+ * card touch like a sqlite transaction does. A clock-step marker (csv
+ * params, jsonl, the .wdl record) is written and made durable by the
+ * mark() call itself, outside any batch.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -51,6 +56,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include <unistd.h>
 
 #include "data_logger_private.h"
@@ -219,6 +225,7 @@ static esp_err_t ap_open(dl_append_ctx_t *c, const char *path,
     c->fmt = fmt;
     c->frames = frames;
     c->start_ms = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    c->mono_open = (uint32_t)(esp_timer_get_time() / 1000);
 
     if (c->bytes == 0)
     {
@@ -312,6 +319,24 @@ static uint64_t ap_bytes(void *ctx)
     return ((dl_append_ctx_t *)ctx)->bytes;
 }
 
+/* one row or record written and made durable on the spot */
+static esp_err_t ap_put_durable(dl_append_ctx_t *c, const void *data,
+                                size_t n)
+{
+    if (c->f == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (fwrite(data, 1, n, (FILE *)c->f) != n)
+    {
+        return ESP_FAIL;
+    }
+
+    c->bytes += n;
+    return ap_commit(c);
+}
+
 /* ---- csv ------------------------------------------------------------------ */
 
 static esp_err_t csv_open(void *ctx, const char *path, bool frames)
@@ -355,6 +380,22 @@ static esp_err_t csv_write(void *ctx, const dl_record_t *rec,
     return ESP_OK;
 }
 
+/* the params csv has a row for it; the CAN csv has no column (journal only) */
+static esp_err_t csv_mark(void *ctx, const dl_clock_step_t *step)
+{
+    dl_append_ctx_t *c = ctx;
+    char row[64];
+
+    if (c->frames)
+    {
+        return ESP_OK;
+    }
+
+    int n = dl_csv_step_row(row, sizeof(row), step);
+
+    return (n > 0) ? ap_put_durable(c, row, (size_t)n) : ESP_FAIL;
+}
+
 const dl_engine_t dl_engine_csv =
 {
     .ext = ".csv",
@@ -365,6 +406,7 @@ const dl_engine_t dl_engine_csv =
     .write = csv_write,
     .commit = ap_commit,
     .bytes = ap_bytes,
+    .mark = csv_mark,
 };
 
 /* ---- binary ---------------------------------------------------------------- */
@@ -449,6 +491,15 @@ static esp_err_t bin_write(void *ctx, const dl_record_t *rec,
     return ESP_OK;
 }
 
+/* the 0x04 record: only as the last one before a close (mark_close_only) */
+static esp_err_t bin_mark(void *ctx, const dl_clock_step_t *step)
+{
+    uint8_t rec[DL_WDL_STEP_LEN];
+    size_t n = dl_wdl_encode_step(rec, step);
+
+    return ap_put_durable(ctx, rec, n);
+}
+
 const dl_engine_t dl_engine_binary =
 {
     .ext = ".wdl",
@@ -460,6 +511,8 @@ const dl_engine_t dl_engine_binary =
     .write = bin_write,
     .commit = ap_commit,
     .bytes = ap_bytes,
+    .mark = bin_mark,
+    .mark_close_only = true,
 };
 
 /* ---- candump / asc / jsonl (addendum 2) -------------------------------------
@@ -539,9 +592,13 @@ static esp_err_t asc_write(void *ctx, const dl_record_t *rec,
 
     char row[80];
 
+    /* relative to the open by the monotonic clock: a wall step cannot
+       make the time run backwards (the header date stays as written) */
     return row_write(c, row,
-                     dl_asc_row(row, sizeof(row), c->start_ms,
-                                rec->ts_ms, rec->u.f.id, rec->u.f.flags,
+                     dl_asc_row(row, sizeof(row),
+                                dl_clock_rel_ms(rec, c->start_ms,
+                                                c->mono_open),
+                                rec->u.f.id, rec->u.f.flags,
                                 rec->u.f.data, rec->u.f.dlc));
 }
 
@@ -584,6 +641,15 @@ static esp_err_t jsonl_write(void *ctx, const dl_record_t *rec,
     return row_write(ctx, row, n);
 }
 
+/* a line without `param` / `id`: consumers that read by key skip it */
+static esp_err_t jsonl_mark(void *ctx, const dl_clock_step_t *step)
+{
+    char row[128];
+    int n = dl_jsonl_step_row(row, sizeof(row), step);
+
+    return (n > 0) ? ap_put_durable(ctx, row, (size_t)n) : ESP_FAIL;
+}
+
 const dl_engine_t dl_engine_jsonl =
 {
     .ext = ".jsonl",
@@ -594,4 +660,5 @@ const dl_engine_t dl_engine_jsonl =
     .write = jsonl_write,
     .commit = ap_commit,
     .bytes = ap_bytes,
+    .mark = jsonl_mark,
 };

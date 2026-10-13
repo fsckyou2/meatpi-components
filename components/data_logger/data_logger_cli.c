@@ -160,6 +160,12 @@ static int cmd_logger(int argc, char **argv)
                    (unsigned long)st.errors,
                    (unsigned long)st.rotations,
                    (unsigned long)st.can_rotations);
+    cmdline_printf("  clock:  %s (%s), %lu step(s) this boot, %lu rotation(s) "
+                   "by the clock, journal %lu B\n",
+                   st.clock_valid ? "valid" : "not set",
+                   st.clock_source, (unsigned long)st.clock_steps,
+                   (unsigned long)st.clock_rotations,
+                   (unsigned long)st.journal_bytes);
     return 0;
 }
 
