@@ -58,7 +58,7 @@ static SemaphoreHandle_t s_lock;
 static StaticSemaphore_t s_lock_buf; /* internal: FreeRTOS object */
 static bool s_started;
 static bool s_time_valid;
-static rtcm_clock_t s_clock;         /* the step bookkeeping, under s_lock */
+static rtcm_clock_t s_clock EXT_RAM_BSS_ATTR; /* the step bookkeeping, under s_lock */
 
 static time_t s_last_sync;              /* epoch of the last SNTP sync */
 static SemaphoreHandle_t s_sntp_lock;   /* task vs /api/rtc/sync       */
