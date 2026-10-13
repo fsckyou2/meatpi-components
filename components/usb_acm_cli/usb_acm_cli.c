@@ -117,7 +117,7 @@ static StaticSemaphore_t s_subs_lock_buf;
 /* a plain GNSS receiver on the console (2026-10-07): it streams NMEA by
  * itself, so the RX task parses the sentences and nothing is ever sent to
  * it (the poll task's `gps -p -j` is the ESPNetLink's console, not NMEA) */
-static usb_acm_nmea_t s_nmea;
+static usb_acm_nmea_t s_nmea EXT_RAM_BSS_ATTR;
 static volatile bool s_nmea_mode;
 
 /* the reader runs while either switch is on */
