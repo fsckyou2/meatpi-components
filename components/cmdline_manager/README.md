@@ -32,7 +32,8 @@ additions are options too.
 | `help [cmd]` | cmdline_manager (the registry's own; legacy format) |
 | `version`, `status` | dev_status_manager |
 | `wifi -s/-i/--scan`, `wifi --try <ssid> [--password <pw>]` | wifi_manager (`-s`/`-i` legacy-exact; `--scan` = v6 JSON scan; `--try` = the connection trial of 2026-10-06, joins without saving and prints `connected: ip, rssi dBm, channel N, in N ms` or `password|not_found|refused|no_ip|timeout (reason N) after N ms`, up to 20 s) |
-| `rtc -s/-r/-i` | rtc_manager (sync/read legacy-exact; `-i` = responding probe: the RX8130 has no ID register) |
+| `rtc -s/-r/-i/--forget` | rtc_manager (sync/read legacy-exact; `-i` = responding probe: the RX8130 has no ID register; bare = the summary incl. the clock-step line since 2026-10-13; `--forget` writes 2000-01-01 into the chip so the next power-on boot starts without a clock: the bench's drained-caps unit, issue #984) |
+| `logger`, `logger test <rows>`, `logger frametest <n>` | data_logger (new in v6: both streams' status incl. the clock line, synthetic rows / frames for the bench; the row was missing from this table until 2026-10-13) |
 | `imu -i/-r` | imu_manager (`-i` legacy-exact; `-r` + bare = v6 activity/accel/temp) |
 | `led -i/-c <r g b>/-b/-x` | led_manager (legacy set-color drives an ALERT-priority indication: the arbiter owns the LED; `-x/--clear` releases it) |
 | `battery` | battery_monitor (new in v6) |
