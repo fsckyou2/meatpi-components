@@ -22,9 +22,15 @@
 
 /**
  * @file rtc_manager.c
- * @brief Lifecycle, boot-time system-clock restore, and the SNTP sync task
- *        (see include/rtc_manager.h for the model). Settings live in
- *        rtc_manager_settings.c (standard §4.1).
+ * @brief Lifecycle, boot-time system-clock restore, the SNTP sync task and
+ *        the clock-step bookkeeping (see include/rtc_manager.h for the
+ *        model). Settings live in rtc_manager_settings.c (standard 4.1).
+ *
+ * Every set of the system clock goes through clock_note_locked(): the
+ * boot restore and the manual set write the clock here, lwIP's SNTP
+ * writes it itself, and all three are measured the same way (the change
+ * of wall - mono, esp_timer being the monotonic reference), counted and
+ * published as `time.step`.
  */
 #include "rtc_manager.h"
 
@@ -35,6 +41,7 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -51,6 +58,7 @@ static SemaphoreHandle_t s_lock;
 static StaticSemaphore_t s_lock_buf; /* internal: FreeRTOS object */
 static bool s_started;
 static bool s_time_valid;
+static rtcm_clock_t s_clock;         /* the step bookkeeping, under s_lock */
 
 static time_t s_last_sync;              /* epoch of the last SNTP sync */
 static SemaphoreHandle_t s_sntp_lock;   /* task vs /api/rtc/sync       */
@@ -63,6 +71,19 @@ static StackType_t s_stack[4096] EXT_RAM_BSS_ATTR;
 
 /* ---- helpers ---------------------------------------------------------------- */
 
+static int64_t wall_ms_now(void)
+{
+    struct timeval tv;
+
+    gettimeofday(&tv, NULL);
+    return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+static int64_t mono_ms_now(void)
+{
+    return esp_timer_get_time() / 1000;
+}
+
 static esp_err_t write_rtc_from_system(void)
 {
     time_t now = time(NULL);
@@ -74,13 +95,30 @@ static esp_err_t write_rtc_from_system(void)
     return rtc_rx8130_write(regs);
 }
 
+/* The one place a set of the system clock is recorded (issue #984). The
+ * writer may be this component (settimeofday just before) or lwIP's SNTP
+ * (settimeofday at the reply): the step is the change of wall - mono
+ * either way. s_lock held by the caller. */
+static void clock_note_locked(uint8_t source, rtc_clock_step_t *out)
+{
+    rtcm_clock_note(&s_clock, wall_ms_now(), mono_ms_now(), source, out);
+    s_time_valid = true;
+}
+
+/* after the lock is released: the status bit and the event */
+static void clock_announce(const rtc_clock_step_t *step)
+{
+    dev_status_manager_set(DEV_STATUS_BIT_TIME_SYNCED);
+    rtcm_events_step(step);
+}
+
 /* ---- SNTP task -------------------------------------------------------------
  * Sync policy (meatpi 2026-07-04): sync system time + RTC on EVERY
  * internet (re)connect (not just the first) plus a configurable
  * periodic resync while the link stays up. Failed attempts retry in
  * 60 s. */
 
-/** One SNTP attempt against @p server (~@p tries × 2 s). */
+/** One SNTP attempt against @p server (~@p tries x 2 s). */
 static bool sntp_try_server(const char *server, int tries)
 {
     esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(server);
@@ -112,18 +150,20 @@ static bool sntp_try_server(const char *server, int tries)
 
     if (ok)
     {
+        rtc_clock_step_t step;
+
         xSemaphoreTake(s_lock, portMAX_DELAY);
         write_rtc_from_system();
-        s_time_valid = true;
+        clock_note_locked(RTC_CLOCK_SRC_SNTP, &step);
         s_last_sync = time(NULL);
         xSemaphoreGive(s_lock);
-        dev_status_manager_set(DEV_STATUS_BIT_TIME_SYNCED);
+        clock_announce(&step);
 
         char stamp[24];
 
         rtc_manager_now_iso8601(stamp, sizeof(stamp));
-        ESP_LOGI(TAG, "SNTP synced via %s, RTC updated (%s)", server,
-                 stamp);
+        ESP_LOGI(TAG, "SNTP synced via %s, RTC updated (%s): the clock "
+                 "moved %+lld ms", server, stamp, (long long)step.delta_ms);
     }
     else
     {
@@ -203,6 +243,11 @@ esp_err_t rtc_manager_init(void)
     setenv("TZ", "UTC0", 1);
     tzset();
 
+    /* the clocks as found are the baseline: a warm reset carries the
+     * system clock, a power-on reads 1970 + uptime; the first set of this
+     * boot is measured against it */
+    rtcm_clock_init(&s_clock, wall_ms_now(), mono_ms_now());
+
     rtcm_events_register();
     return rtcm_settings_register();
 }
@@ -212,7 +257,7 @@ esp_err_t rtc_manager_start(void)
     if (!rtcm_settings_is_configured())
     {
         ESP_LOGE(TAG, "unconfigured; not starting");
-        return ESP_ERR_INVALID_STATE; /* standard §4.3 step 5 */
+        return ESP_ERR_INVALID_STATE; /* standard 4.3 step 5 */
     }
 
     if (s_started)
@@ -233,20 +278,25 @@ esp_err_t rtc_manager_start(void)
         return err;
     }
 
-    /* restore the system clock from the battery-backed RTC */
+    /* restore the system clock from the battery-backed RTC: a pure
+     * civil-to-epoch conversion, no mktime (which would follow whatever
+     * TZ is set; the UTC0 pin above is belt and braces) */
     struct tm t;
 
     if (rtc_manager_get_time(&t) == ESP_OK)
     {
-        struct timeval tv = { .tv_sec = mktime(&t) }; /* UTC (TZ unset) */
+        struct timeval tv = { .tv_sec = (time_t)rtc_time_to_epoch(&t) };
+        rtc_clock_step_t step;
 
         settimeofday(&tv, NULL);
-        s_time_valid = true;
-        dev_status_manager_set(DEV_STATUS_BIT_TIME_SYNCED);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        clock_note_locked(RTC_CLOCK_SRC_RTC, &step);
+        xSemaphoreGive(s_lock);
+        clock_announce(&step);
         ESP_LOGI(TAG, "system time restored from RTC: "
-                 "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                 "%04d-%02d-%02dT%02d:%02d:%02dZ (the clock moved %+lld ms)",
                  t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour,
-                 t.tm_min, t.tm_sec);
+                 t.tm_min, t.tm_sec, (long long)step.delta_ms);
     }
     else
     {
@@ -315,6 +365,7 @@ esp_err_t rtc_manager_set_time(time_t epoch)
     }
 
     struct timeval tv = { .tv_sec = epoch };
+    rtc_clock_step_t step;
 
     settimeofday(&tv, NULL);
 
@@ -322,20 +373,49 @@ esp_err_t rtc_manager_set_time(time_t epoch)
 
     esp_err_t err = write_rtc_from_system();
 
+    /* the system clock moved whether or not the chip took it */
+    clock_note_locked(RTC_CLOCK_SRC_MANUAL, &step);
+    xSemaphoreGive(s_lock);
+    clock_announce(&step);
+
+    char stamp[24];
+
+    rtc_manager_now_iso8601(stamp, sizeof(stamp));
+
     if (err == ESP_OK)
     {
-        s_time_valid = true;
+        ESP_LOGI(TAG, "time set manually (%s), RTC updated: the clock moved "
+                 "%+lld ms", stamp, (long long)step.delta_ms);
     }
+    else
+    {
+        ESP_LOGW(TAG, "time set manually (%s) but the RTC write failed: %s",
+                 stamp, esp_err_to_name(err));
+    }
+
+    return err;
+}
+
+esp_err_t rtc_manager_forget_chip(void)
+{
+    /* 2000-01-01 00:00:00: the plausibility gate rejects year 00 at the
+     * next power-on, exactly what a drained-caps unit reads */
+    struct tm t = { .tm_mday = 1, .tm_year = 100 };
+    uint8_t regs[RTC_REGS_LEN];
+
+    rtc_time_encode(&t, regs);
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+
+    esp_err_t err = rtc_rx8130_write(regs);
 
     xSemaphoreGive(s_lock);
 
     if (err == ESP_OK)
     {
-        char stamp[24];
-
-        dev_status_manager_set(DEV_STATUS_BIT_TIME_SYNCED);
-        rtc_manager_now_iso8601(stamp, sizeof(stamp));
-        ESP_LOGI(TAG, "time set manually (%s), RTC updated", stamp);
+        ESP_LOGW(TAG, "RTC chip set to 2000-01-01 on request: the next "
+                 "power-on boot starts without a clock (a software restart "
+                 "keeps the running one)");
     }
 
     return err;
@@ -359,6 +439,46 @@ esp_err_t rtc_manager_now_iso8601(char *buf, size_t len)
 bool rtc_manager_time_valid(void)
 {
     return s_time_valid;
+}
+
+void rtc_manager_clock_state(rtc_clock_state_t *out)
+{
+    if (out == NULL)
+    {
+        return;
+    }
+
+    if (s_lock == NULL)
+    {
+        memset(out, 0, sizeof(*out)); /* before init: nothing happened */
+        return;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    rtcm_clock_state(&s_clock, out);
+    xSemaphoreGive(s_lock);
+}
+
+int rtc_manager_steps_since(uint32_t since, rtc_clock_step_t *out, int cap)
+{
+    if (out == NULL || cap <= 0 || s_lock == NULL)
+    {
+        return 0;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+
+    int n = rtcm_clock_steps_since(&s_clock, since, out, cap);
+
+    xSemaphoreGive(s_lock);
+    return n;
+}
+
+const char *rtc_manager_source_name(uint8_t source)
+{
+    static const char *const NAMES[] = { "none", "rtc", "sntp", "manual" };
+
+    return (source < sizeof(NAMES) / sizeof(NAMES[0])) ? NAMES[source] : "?";
 }
 
 esp_err_t rtc_manager_sync_now(void)

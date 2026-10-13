@@ -25,7 +25,7 @@
  * @brief The optional /api/rtc routes (§9.1: feature components register
  *        their own domain routes), main calls rtc_manager_register_http()
  *        only in HTTP compositions, so the chip code carries no HTTP
- *        dependency. Documented in components/HTTP_API.md §6d.
+ *        dependency. Documented in components/HTTP_API.md section 6d.
  */
 #include <stdio.h>
 #include <time.h>
@@ -45,8 +45,10 @@ static esp_err_t rtc_get_handler(httpd_req_t *req)
     char now[24] = "";
     char chip[24] = "";
     char last[24] = "";
+    char last_step[112] = "null";
     struct tm t;
-    char body[256];
+    rtc_clock_state_t cs;
+    char body[512];
 
     rtc_manager_now_iso8601(now, sizeof(now));
 
@@ -65,10 +67,29 @@ static esp_err_t rtc_get_handler(httpd_req_t *req)
         strftime(last, sizeof(last), "%Y-%m-%dT%H:%M:%SZ", &lt);
     }
 
+    /* the clock's history (2026-10-13): every set is a measured step */
+    rtc_manager_clock_state(&cs);
+
+    if (cs.steps_this_boot > 0)
+    {
+        time_t at = (time_t)(cs.last.wall_ms / 1000);
+        struct tm lt;
+        char at_iso[24];
+
+        gmtime_r(&at, &lt);
+        strftime(at_iso, sizeof(at_iso), "%Y-%m-%dT%H:%M:%SZ", &lt);
+        snprintf(last_step, sizeof(last_step),
+                 "{\"delta_ms\":%lld,\"source\":\"%s\",\"at\":\"%s\"}",
+                 (long long)cs.last.delta_ms,
+                 rtc_manager_source_name(cs.last.source), at_iso);
+    }
+
     snprintf(body, sizeof(body),
              "{\"time\":\"%s\",\"valid\":%s,\"rtc\":%s%s%s,"
              "\"sntp\":{\"enabled\":%s,\"server\":\"%s\","
-             "\"last_sync\":%s%s%s}}",
+             "\"last_sync\":%s%s%s},"
+             "\"clock\":{\"source\":\"%s\",\"generation\":%lu,"
+             "\"steps_this_boot\":%lu,\"last_step\":%s}}",
              now, rtc_manager_time_valid() ? "true" : "false",
              (chip[0] != '\0') ? "\"" : "",
              (chip[0] != '\0') ? chip : "null",
@@ -77,7 +98,10 @@ static esp_err_t rtc_get_handler(httpd_req_t *req)
              rtc_manager_ntp_server(),
              (last[0] != '\0') ? "\"" : "",
              (last[0] != '\0') ? last : "null",
-             (last[0] != '\0') ? "\"" : "");
+             (last[0] != '\0') ? "\"" : "",
+             rtc_manager_source_name(cs.source),
+             (unsigned long)cs.generation,
+             (unsigned long)cs.steps_this_boot, last_step);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }

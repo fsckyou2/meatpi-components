@@ -22,7 +22,8 @@
 
 /**
  * @file rtc_manager_time.c
- * @brief PURE RX8130 register-image <-> struct tm codec. No I2C, no RTOS:
+ * @brief PURE RX8130 register-image <-> struct tm codec, and the pure
+ *        civil-to-epoch conversion. No I2C, no RTOS, no libc time:
  *        host-testable.
  */
 #include "rtc_manager_private.h"
@@ -42,7 +43,7 @@ bool rtc_time_decode(const uint8_t regs[RTC_REGS_LEN], struct tm *out)
     int sec = bcd_to_dec(regs[0] & 0x7F);
     int min = bcd_to_dec(regs[1] & 0x7F);
     int hour = bcd_to_dec(regs[2] & 0x3F);
-    /* regs[3] = weekday (one-hot): ignored, mktime recomputes it */
+    /* regs[3] = weekday (one-hot): ignored */
     int day = bcd_to_dec(regs[4] & 0x3F);
     int month = bcd_to_dec(regs[5] & 0x1F);
     int year = bcd_to_dec(regs[6]);
@@ -78,4 +79,27 @@ void rtc_time_encode(const struct tm *in, uint8_t regs[RTC_REGS_LEN])
     regs[4] = dec_to_bcd(in->tm_mday);
     regs[5] = dec_to_bcd(in->tm_mon + 1);
     regs[6] = dec_to_bcd(in->tm_year % 100);
+}
+
+/* days from civil (Howard Hinnant's algorithm): proleptic Gregorian,
+ * 1970-01-01 = day 0; exact for every date the chip can hold */
+int64_t rtc_time_to_epoch(const struct tm *utc)
+{
+    int64_t y = (int64_t)utc->tm_year + 1900;
+    int64_t m = (int64_t)utc->tm_mon + 1;
+    int64_t d = utc->tm_mday;
+
+    if (m <= 2)
+    {
+        y -= 1;
+    }
+
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;                                  /* 0..399 */
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1; /* 0..365 */
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;          /* 0..146096 */
+    int64_t days = era * 146097 + doe - 719468;
+
+    return days * 86400 + (int64_t)utc->tm_hour * 3600 +
+           (int64_t)utc->tm_min * 60 + utc->tm_sec;
 }

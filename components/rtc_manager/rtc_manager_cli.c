@@ -27,7 +27,8 @@
  *        in CLI compositions only). Legacy option interface preserved
  *        (-s/--sync, -r/--read, -i/--id); bare = the v6 summary. The
  *        RX8130 has no ID register, so -i reports a responding probe
- *        (legacy read back a fixed register).
+ *        (legacy read back a fixed register). `--forget` (2026-10-13) is
+ *        the bench's drained-caps unit on demand.
  */
 #include <time.h>
 
@@ -42,6 +43,7 @@ static struct
     struct arg_lit *sync;
     struct arg_lit *read;
     struct arg_lit *id;
+    struct arg_lit *forget;
     struct arg_end *end;
 } s_args;
 
@@ -49,6 +51,7 @@ static int rtc_summary(void)
 {
     char iso[24];
     struct tm rtc_tm;
+    rtc_clock_state_t cs;
 
     if (rtc_manager_now_iso8601(iso, sizeof(iso)) == ESP_OK)
     {
@@ -73,6 +76,22 @@ static int rtc_summary(void)
                    rtc_manager_sntp_enabled() ? "yes" : "no",
                    rtc_manager_ntp_server(),
                    (long)rtc_manager_last_sync());
+    rtc_manager_clock_state(&cs);
+
+    if (cs.steps_this_boot == 0)
+    {
+        cmdline_printf("Clock steps: none this boot (1970 + uptime)\n");
+    }
+    else
+    {
+        cmdline_printf("Clock steps: %lu this boot, last %+lld ms by %s "
+                       "(generation %lu)\n",
+                       (unsigned long)cs.steps_this_boot,
+                       (long long)cs.last.delta_ms,
+                       rtc_manager_source_name(cs.last.source),
+                       (unsigned long)cs.generation);
+    }
+
     cmdline_printf("OK\n");
     return 0;
 }
@@ -133,6 +152,21 @@ static int cmd_rtc(int argc, char **argv)
         return 0;
     }
 
+    if (s_args.forget->count > 0)
+    {
+        if (rtc_manager_forget_chip() != ESP_OK)
+        {
+            cmdline_printf("Error: Failed to write the RTC chip\n");
+            return 1;
+        }
+
+        cmdline_printf("RTC chip set to 2000-01-01: the next POWER-ON boot "
+                       "starts without a clock (a software restart keeps "
+                       "the running one)\n");
+        cmdline_printf("OK\n");
+        return 0;
+    }
+
     return rtc_summary();
 }
 
@@ -142,7 +176,7 @@ esp_err_t rtc_manager_register_cli(void)
     {
         .command = "rtc",
         .help = "RTC module control",
-        .hint = "Options: -s/--sync, -r/--read, -i/--id",
+        .hint = "Options: -s/--sync, -r/--read, -i/--id, --forget",
         .func = cmd_rtc,
         .argtable = &s_args,
     };
@@ -150,6 +184,9 @@ esp_err_t rtc_manager_register_cli(void)
     s_args.sync = arg_lit0("s", "sync", "Sync time from internet");
     s_args.read = arg_lit0("r", "read", "Read current time and date");
     s_args.id = arg_lit0("i", "id", "Get RTC module device ID");
-    s_args.end = arg_end(3);
+    s_args.forget = arg_lit0(NULL, "forget",
+                             "Write 2000-01-01 into the chip: the next "
+                             "power-on boot has no clock (bench aid)");
+    s_args.end = arg_end(4);
     return cmdline_manager_register(&CMD);
 }
