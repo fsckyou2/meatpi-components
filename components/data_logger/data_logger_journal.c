@@ -38,6 +38,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -57,7 +58,7 @@ static bool     s_boot_logged;
 static bool     s_caught_up;      /* the first lap took the generation */
 static uint32_t s_seen_gen;
 static bool     s_valid_seen;     /* a valid clock was seen this boot  */
-static dl_clock_step_t s_steps[DL_CLOCK_STEPS_KEEP]; /* for re-basing  */
+static dl_clock_step_t s_steps[DL_CLOCK_STEPS_KEEP] EXT_RAM_BSS_ATTR; /* for re-basing */
 static uint32_t s_nsteps;         /* pushed in all; ring = n % KEEP    */
 static uint32_t s_rot_by_clock;
 static uint32_t s_journal_bytes;
