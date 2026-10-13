@@ -101,6 +101,14 @@ static void test_parse_abrp_defaults(void)
                                     "\"url\":\"http://x\",\"auth\":"
                                     "\"api_key_query\",\"auth_token\":\"k\"}"));
     TEST_ASSERT_EQUAL_STRING("api_key", s_d.auth_name);
+    /* the ABRP period floor (Iternio: one point per 5 s), applied not
+       rejected; other types keep their period */
+    TEST_ASSERT_EQUAL(ESP_OK, parse("{\"name\":\"a\",\"type\":\"abrp\","
+                                    "\"auth_token\":\"tok\",\"period_s\":2}"));
+    TEST_ASSERT_EQUAL_UINT32(5, s_d.period_s);
+    TEST_ASSERT_EQUAL(ESP_OK, parse("{\"name\":\"h\",\"type\":\"http\","
+                                    "\"url\":\"http://x\",\"period_s\":2}"));
+    TEST_ASSERT_EQUAL_UINT32(2, s_d.period_s);
 }
 
 static void test_config_parse_duplicates_and_cap(void)
@@ -319,6 +327,23 @@ static void test_abrp_response(void)
                                           "[\"utc\"]}", true, err,
                                           sizeof(err)));
     TEST_ASSERT_EQUAL_STRING("abrp: error [\"utc\"]", err);
+    /* the doc's `errors` list */
+    TEST_ASSERT_FALSE(dd_abrp_response_ok("{\"status\":\"error\",\"errors\":"
+                                          "[\"bad utc\"]}", true, err,
+                                          sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("abrp: error [\"bad utc\"]", err);
+    /* the live service's refusals, word for word (HTTP 401, 2026-10-13):
+       the text is what the user needs to see */
+    TEST_ASSERT_FALSE(dd_abrp_response_ok("{\"status\": \"error\", "
+                                          "\"errortext\": \"Unauthorized "
+                                          "Token\"}", false, err,
+                                          sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("abrp: error \"Unauthorized Token\"", err);
+    TEST_ASSERT_FALSE(dd_abrp_response_ok("{\"status\": \"error\", "
+                                          "\"errortext\": \"Unauthorized "
+                                          "Key\"}", false, err,
+                                          sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("abrp: error \"Unauthorized Key\"", err);
     /* not JSON / empty: the HTTP outcome decides */
     TEST_ASSERT_TRUE(dd_abrp_response_ok("OK", true, err, sizeof(err)));
     TEST_ASSERT_FALSE(dd_abrp_response_ok("", false, err, sizeof(err)));
@@ -340,6 +365,74 @@ static void test_enum_strings(void)
     TEST_ASSERT_TRUE(dd_auth_parse("basic", &a));
     TEST_ASSERT_EQUAL_STRING("api_key_query",
                              dd_auth_str(DD_AUTH_API_KEY_QUERY));
+}
+
+static void test_sched_rate_limited(void)
+{
+    dd_state_t st = { 0 };
+
+    /* a 429 goes to the ladder's cap at once: 60 s for a 5 s row */
+    dd_sched_rate_limited(&st, 5, 1000000);
+    TEST_ASSERT_EQUAL_UINT32(1, st.fail);
+    TEST_ASSERT_EQUAL_UINT32(DD_BACKOFF_AFTER, st.consec_failures);
+    TEST_ASSERT_EQUAL_UINT32(60000, st.backoff_ms);
+    TEST_ASSERT_EQUAL_INT64(61000000, st.next_due_us);
+    /* 8 x 120 s is capped at 10 min; the count keeps growing */
+    dd_sched_rate_limited(&st, 120, 0);
+    TEST_ASSERT_EQUAL_UINT32(600000, st.backoff_ms);
+    TEST_ASSERT_EQUAL_UINT32(4, st.consec_failures);
+    /* one success clears it all */
+    dd_sched_after(&st, 5, true, 0);
+    TEST_ASSERT_EQUAL_UINT32(0, st.backoff_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, st.consec_failures);
+}
+
+static void test_abrp_pacer(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(0, dd_pace_wait_ms(0, 5000000));  /* none yet */
+    TEST_ASSERT_EQUAL_UINT32(1500, dd_pace_wait_ms(4000000, 5000000));
+    TEST_ASSERT_EQUAL_UINT32(2500, dd_pace_wait_ms(5000000, 5000000));
+    TEST_ASSERT_EQUAL_UINT32(0, dd_pace_wait_ms(2500000, 5000000));
+    TEST_ASSERT_EQUAL_UINT32(0, dd_pace_wait_ms(1000000, 5000000));
+}
+
+static void test_abrp_coverage(void)
+{
+    /* the bench car: a GPS fix and nothing of the battery (the neutral
+       fixture position) */
+    cJSON *snap = cJSON_Parse("{\"gps_latitude\":-25.3444,"
+                              "\"gps_longitude\":131.0369,\"gps_speed\":0}");
+    cJSON *cov = dd_abrp_coverage(snap);
+    const cJSON *present = cJSON_GetObjectItemCaseSensitive(cov, "present");
+    const cJSON *missing = cJSON_GetObjectItemCaseSensitive(cov, "missing");
+
+    TEST_ASSERT_NOT_NULL(cov);
+    TEST_ASSERT_EQUAL(4, cJSON_GetArraySize(present)); /* lat lon speed utc */
+    TEST_ASSERT_EQUAL(5, cJSON_GetArraySize(missing));
+    TEST_ASSERT_EQUAL_STRING("soc", cJSON_GetObjectItemCaseSensitive(
+                                        cJSON_GetArrayItem(missing, 0),
+                                        "field")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("SOC", cJSON_GetObjectItemCaseSensitive(
+                                        cJSON_GetArrayItem(missing, 0),
+                                        "parameter")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("power", cJSON_GetObjectItemCaseSensitive(
+                                          cJSON_GetArrayItem(missing, 1),
+                                          "field")->valuestring);
+    cJSON_Delete(cov);
+    cJSON_Delete(snap);
+
+    /* an EV profile with ABRP's names: only the two optional flags remain */
+    snap = cJSON_Parse("{\"SOC\":73.5,\"HV_W\":-6.2,\"CHARGING\":\"on\","
+                       "\"SPEED\":0,\"gps_latitude\":-25.3444,"
+                       "\"gps_longitude\":131.0369}");
+    cov = dd_abrp_coverage(snap);
+    missing = cJSON_GetObjectItemCaseSensitive(cov, "missing");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(missing));
+    TEST_ASSERT_EQUAL_STRING("is_dcfc", cJSON_GetObjectItemCaseSensitive(
+                                            cJSON_GetArrayItem(missing, 0),
+                                            "field")->valuestring);
+    cJSON_Delete(cov);
+    cJSON_Delete(snap);
 }
 
 void setUp(void)
@@ -370,5 +463,8 @@ void app_main(void)
     RUN_TEST(test_abrp_form_and_header);
     RUN_TEST(test_abrp_response);
     RUN_TEST(test_enum_strings);
+    RUN_TEST(test_sched_rate_limited);
+    RUN_TEST(test_abrp_pacer);
+    RUN_TEST(test_abrp_coverage);
     UNITY_END();
 }

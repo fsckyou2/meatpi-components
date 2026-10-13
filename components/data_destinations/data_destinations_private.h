@@ -61,6 +61,12 @@ extern "C" {
 #define DD_BACKOFF_CAP_MAX_MS 600000  /* never wait more than 10 min          */
 #define DD_HTTP_TIMEOUT_MS    6000
 #define DD_ABRP_DEFAULT_URL   "https://api.iternio.com/1/tlm/send"
+/* the ABRP rate guard (2026-10-13): Iternio takes one point per 5 s and
+   allows 2 requests per second per api_key; a row runs at 5 s at least and
+   the device starts ABRP requests (the Test button included) at least
+   DD_ABRP_MIN_GAP_MS apart, a fifth of the limit whatever the table says */
+#define DD_ABRP_MIN_PERIOD_S  5
+#define DD_ABRP_MIN_GAP_MS    2500
 
 typedef enum
 {
@@ -156,6 +162,25 @@ bool dd_sched_due(const dd_state_t *st, int64_t now_us);
 /** The next backed-off interval: doubles from the period, floor
  *  DD_BACKOFF_FLOOR_MS, cap max(period*DD_BACKOFF_MAX_MULT, 60 s) ≤ 10 min. */
 uint32_t dd_backoff_next(uint32_t prev_ms, uint32_t period_ms);
+
+/** Book an HTTP 429 (rate limited): a failure that goes to the ladder's cap
+ *  (max(period*DD_BACKOFF_MAX_MULT, 60 s) ≤ 10 min) at once, not after
+ *  DD_BACKOFF_AFTER tries. */
+void dd_sched_rate_limited(dd_state_t *st, uint32_t period_s, int64_t now_us);
+
+/** The device-wide ABRP pacer: milliseconds to wait before the next ABRP
+ *  request may START (0 = now), given the start of the previous one
+ *  (@p last_start_us 0 = none yet). */
+uint32_t dd_pace_wait_ms(int64_t last_start_us, int64_t now_us);
+
+/**
+ * Which of Iternio's high-priority `tlm` fields the flat autopid snapshot
+ * provides: `{"present":[field,...],"missing":[{"field","parameter"},...]}`
+ * where `parameter` is the autopid name the field is mapped from (`soc` from
+ * `SOC`, `power` from `HV_W`, `is_charging` from `CHARGING`, ...). Caller
+ * frees.
+ */
+cJSON *dd_abrp_coverage(const cJSON *snapshot);
 
 /** Book an attempt's outcome: counters, backoff, next due time. */
 void dd_sched_after(dd_state_t *st, uint32_t period_s, bool ok,

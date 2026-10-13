@@ -57,6 +57,7 @@
 #include "freertos/task.h"
 
 #include "dev_status_manager.h"
+#include "autopid.h"
 #include "log_manager.h"
 #include "mqtt_manager.h"
 
@@ -93,6 +94,13 @@ static dd_dest_t s_work EXT_RAM_BSS_ATTR;
 
 /* logged-state per destination for the offline transitions */
 static bool s_offline_logged[DD_MAX];
+
+/* the device-wide ABRP pacer (poster task only): the start of the last
+   ABRP request, the requests (rows and Tests alike) that waited for the
+   gap and the time they waited */
+static int64_t  s_abrp_last_start_us;
+static uint32_t s_abrp_waits;
+static uint32_t s_abrp_waited_ms;
 
 void dd_config_lock(void)
 {
@@ -242,10 +250,37 @@ static void run_one(size_t i, const dd_dest_t *d, bool forced,
         s_offline_logged[i] = false;
     }
 
+    if (d->type == DD_TYPE_ABRP)
+    {
+        /* one ABRP request per DD_ABRP_MIN_GAP_MS per device, the Test
+           button included: Iternio allows 2 per second per api_key, and no
+           table or click pattern may pass a fifth of that */
+        uint32_t wait = dd_pace_wait_ms(s_abrp_last_start_us, now);
+
+        if (wait > 0)
+        {
+            /* the row WAITS for the gap (at most 2.5 s, on the poster):
+               skipping the lap instead starved the third ABRP row of a
+               table for good, it was always checked right after a sibling
+               had sent (the live bench, 2026-10-13) */
+            s_abrp_waits++;
+            s_abrp_waited_ms += wait;
+            vTaskDelay(pdMS_TO_TICKS(wait));
+            now = esp_timer_get_time();
+        }
+
+        s_abrp_last_start_us = now;
+    }
+
+    int prev_status = st.last_status;
     data_destinations_result_t r = { 0 };
     bool ok = dd_post_one(d, &st, &r);
 
-    now = esp_timer_get_time();
+    /* the period counts from the START of the delivery (`now` is the lap's
+       time before dd_post_one): booked from its end, a 5 s ABRP row sent a
+       point every 7.5 s (its 1.8 s TLS round trip plus the queue) where
+       Iternio wants one every 5 s (the live bench, 2026-10-13); a delivery
+       slower than its period is simply followed by the next one */
     st.last_status = r.status;
 
     if (ok)
@@ -277,13 +312,28 @@ static void run_one(size_t i, const dd_dest_t *d, bool forced,
         }
     }
 
-    dd_sched_after(&st, d->period_s, ok, now);
-
-    if (!ok && st.consec_failures == DD_BACKOFF_AFTER)
+    if (!ok && r.status == 429)
     {
-        ESP_LOGW(TAG, "%s: %u consecutive failures - backing off to %us",
-                 d->name, (unsigned)st.consec_failures,
-                 (unsigned)(st.backoff_ms / 1000));
+        /* a rate limit (Iternio: 2 requests per second per api_key): the
+           ladder's cap at once, not after three tries */
+        dd_sched_rate_limited(&st, d->period_s, now);
+
+        if (prev_status != 429)
+        {
+            ESP_LOGW(TAG, "%s: rate limited (HTTP 429): backing off to %us",
+                     d->name, (unsigned)(st.backoff_ms / 1000));
+        }
+    }
+    else
+    {
+        dd_sched_after(&st, d->period_s, ok, now);
+
+        if (!ok && st.consec_failures == DD_BACKOFF_AFTER)
+        {
+            ESP_LOGW(TAG, "%s: %u consecutive failures - backing off to %us",
+                     d->name, (unsigned)st.consec_failures,
+                     (unsigned)(st.backoff_ms / 1000));
+        }
     }
 
     dd_config_lock();
@@ -401,6 +451,21 @@ esp_err_t data_destinations_status(cJSON **out)
                                             DEV_STATUS_NETWORK_CONNECTED_MASK));
     cJSON_AddBoolToObject(o, "mqtt", mqtt_manager_connected());
 
+    cJSON *pace = cJSON_AddObjectToObject(o, "abrp_pacer");
+
+    if (pace != NULL)
+    {
+        int64_t age_s = s_abrp_last_start_us > 0
+                            ? (esp_timer_get_time() - s_abrp_last_start_us)
+                                  / 1000000
+                            : -1;
+
+        cJSON_AddNumberToObject(pace, "gap_ms", DD_ABRP_MIN_GAP_MS);
+        cJSON_AddNumberToObject(pace, "waits", (double)s_abrp_waits);
+        cJSON_AddNumberToObject(pace, "waited_ms", (double)s_abrp_waited_ms);
+        cJSON_AddNumberToObject(pace, "last_request_age_s", (double)age_s);
+    }
+
     cJSON *arr = cJSON_CreateArray();
     int64_t now = esp_timer_get_time();
 
@@ -456,6 +521,37 @@ esp_err_t data_destinations_status(cJSON **out)
         cJSON_AddItemToObject(o, "destinations", arr);
     }
 
+    *out = o;
+    return ESP_OK;
+}
+
+esp_err_t data_destinations_abrp_coverage(cJSON **out)
+{
+    if (out == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *out = NULL;
+
+    cJSON *snap = NULL;
+
+    if (autopid_snapshot(&snap) != ESP_OK || snap == NULL)
+    {
+        snap = cJSON_CreateObject();
+    }
+
+    cJSON *o = dd_abrp_coverage(snap);
+
+    cJSON_Delete(snap);
+
+    if (o == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddNumberToObject(o, "period_floor_s", DD_ABRP_MIN_PERIOD_S);
+    cJSON_AddNumberToObject(o, "request_gap_ms", DD_ABRP_MIN_GAP_MS);
     *out = o;
     return ESP_OK;
 }

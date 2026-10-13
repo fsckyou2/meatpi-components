@@ -93,6 +93,15 @@ esp_err_t data_destinations_stop(void);
 esp_err_t data_destinations_status(cJSON **out);
 
 /**
+ * Which of ABRP's high-priority telemetry fields the live autopid snapshot
+ * provides (the `GET /api/destinations/abrp` body): `{"present":[...],
+ * "missing":[{"field","parameter"}],"period_floor_s","request_gap_ms"}`,
+ * `parameter` = the autopid name that would fill the field (`SOC`,
+ * `HV_W`, `CHARGING`, ...). Caller frees.
+ */
+esp_err_t data_destinations_abrp_coverage(cJSON **out);
+
+/**
  * Deliver destination @p name ONCE, now, regardless of its cycle or
  * backoff (SYNCHRONOUS: seconds under a bad network, never call from
  * the event dispatcher). The delivery runs on the poster task's stack

@@ -160,6 +160,18 @@ static esp_err_t test_handler(httpd_req_t *req)
     return send_json(req, o, "200 OK");
 }
 
+static esp_err_t abrp_handler(httpd_req_t *req)
+{
+    cJSON *o = NULL;
+
+    if (data_destinations_abrp_coverage(&o) != ESP_OK || o == NULL)
+    {
+        return send_error(req, "500 Internal Server Error", "mem");
+    }
+
+    return send_json(req, o, "200 OK");
+}
+
 esp_err_t data_destinations_register_http(void)
 {
     static const httpd_uri_t URIS[] =
@@ -168,6 +180,8 @@ esp_err_t data_destinations_register_http(void)
           .handler = get_handler },
         { .uri = "/api/destinations/test", .method = HTTP_POST,
           .handler = test_handler },
+        { .uri = "/api/destinations/abrp", .method = HTTP_GET,
+          .handler = abrp_handler },
     };
 
     return http_server_manager_register_handlers(

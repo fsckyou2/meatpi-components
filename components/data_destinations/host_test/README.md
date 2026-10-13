@@ -21,4 +21,4 @@ Covers the PURE core (`data_destinations_core.c`) only: no IDF glue:
 
 Run: `.\test.ps1 host data_destinations` (or by hand on the Pi:
 `idf.py --preview set-target linux && idf.py build && build/*.elf`).
-Expected: Unity `17 Tests 0 Failures 0 Ignored`.
+Expected: Unity `20 Tests 0 Failures 0 Ignored`.

@@ -256,6 +256,13 @@ esp_err_t dd_parse_dest(const cJSON *item, dd_dest_t *out, char *err,
                     "ABRP user token (auth_token) required");
     }
 
+    if (out->type == DD_TYPE_ABRP && out->period_s < DD_ABRP_MIN_PERIOD_S)
+    {
+        /* applied, not rejected: a stored table must never fall back to
+           defaults over a period (Standard §4.3 step 3) */
+        out->period_s = DD_ABRP_MIN_PERIOD_S;
+    }
+
     if (out->type != DD_TYPE_ABRP)
     {
         if ((out->auth == DD_AUTH_BEARER ||
@@ -328,16 +335,11 @@ bool dd_sched_due(const dd_state_t *st, int64_t now_us)
     return st->next_due_us == 0 || now_us >= st->next_due_us;
 }
 
-uint32_t dd_backoff_next(uint32_t prev_ms, uint32_t period_ms)
+/** The ladder's cap for a period: max(period * DD_BACKOFF_MAX_MULT, 60 s),
+ *  never above 10 min. */
+static uint32_t backoff_cap_ms(uint32_t period_ms)
 {
-    uint64_t next = prev_ms != 0 ? (uint64_t)prev_ms * 2
-                                 : (uint64_t)period_ms * 2;
     uint64_t cap = (uint64_t)period_ms * DD_BACKOFF_MAX_MULT;
-
-    if (next < DD_BACKOFF_FLOOR_MS)
-    {
-        next = DD_BACKOFF_FLOOR_MS;
-    }
 
     if (cap < DD_BACKOFF_CAP_MIN_MS)
     {
@@ -349,12 +351,66 @@ uint32_t dd_backoff_next(uint32_t prev_ms, uint32_t period_ms)
         cap = DD_BACKOFF_CAP_MAX_MS;
     }
 
+    return (uint32_t)cap;
+}
+
+uint32_t dd_backoff_next(uint32_t prev_ms, uint32_t period_ms)
+{
+    uint64_t next = prev_ms != 0 ? (uint64_t)prev_ms * 2
+                                 : (uint64_t)period_ms * 2;
+    uint32_t cap = backoff_cap_ms(period_ms);
+
+    if (next < DD_BACKOFF_FLOOR_MS)
+    {
+        next = DD_BACKOFF_FLOOR_MS;
+    }
+
     if (next > cap)
     {
         next = cap;
     }
 
     return (uint32_t)next;
+}
+
+void dd_sched_rate_limited(dd_state_t *st, uint32_t period_s, int64_t now_us)
+{
+    uint32_t cap = backoff_cap_ms(period_s * 1000u);
+
+    st->ever_tried = true;
+    st->was_ok = false;
+    st->fail++;
+    st->consec_failures++;
+
+    if (st->consec_failures < DD_BACKOFF_AFTER)
+    {
+        st->consec_failures = DD_BACKOFF_AFTER;
+    }
+
+    st->backoff_ms = cap;
+    st->next_due_us = now_us + (int64_t)cap * 1000;
+}
+
+uint32_t dd_pace_wait_ms(int64_t last_start_us, int64_t now_us)
+{
+    if (last_start_us <= 0)
+    {
+        return 0;
+    }
+
+    int64_t elapsed_ms = (now_us - last_start_us) / 1000;
+
+    if (elapsed_ms < 0)
+    {
+        elapsed_ms = 0;
+    }
+
+    if (elapsed_ms >= DD_ABRP_MIN_GAP_MS)
+    {
+        return 0;
+    }
+
+    return (uint32_t)(DD_ABRP_MIN_GAP_MS - elapsed_ms);
 }
 
 void dd_sched_after(dd_state_t *st, uint32_t period_s, bool ok,

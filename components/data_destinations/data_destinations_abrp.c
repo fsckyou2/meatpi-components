@@ -222,17 +222,22 @@ bool dd_abrp_response_ok(const char *body, bool http_ok, char *err,
 
         if (!ok && err != NULL)
         {
-            const cJSON *detail = cJSON_GetObjectItemCaseSensitive(root,
-                                                                   "missing");
-
-            if (detail == NULL)
+            /* the doc's `errors` list / `missing` fields; the live service's
+               refusals (HTTP 401, seen 2026-10-13) carry `errortext`:
+               "Unauthorized Key" / "Unauthorized Token" */
+            static const char *const DETAIL_KEYS[] =
             {
-                detail = cJSON_GetObjectItemCaseSensitive(root, "errors");
-            }
+                "missing", "errors", "errortext", "error",
+            };
+            const cJSON *detail = NULL;
 
-            if (detail == NULL)
+            for (size_t i = 0;
+                 detail == NULL &&
+                 i < sizeof(DETAIL_KEYS) / sizeof(DETAIL_KEYS[0]);
+                 i++)
             {
-                detail = cJSON_GetObjectItemCaseSensitive(root, "error");
+                detail = cJSON_GetObjectItemCaseSensitive(root,
+                                                          DETAIL_KEYS[i]);
             }
 
             char *d = detail != NULL ? cJSON_PrintUnformatted(detail) : NULL;
@@ -245,4 +250,61 @@ bool dd_abrp_response_ok(const char *body, bool http_ok, char *err,
 
     cJSON_Delete(root);
     return ok;
+}
+
+cJSON *dd_abrp_coverage(const cJSON *snapshot)
+{
+    /* Iternio's high-priority fields (its doc, in that order) and the
+       autopid parameter each one is mapped from */
+    static const struct
+    {
+        const char *field;
+        const char *parameter;
+    } WANTED[] =
+    {
+        { "soc", "SOC" },             { "power", "HV_W" },
+        { "speed", "SPEED" },         { "lat", "gps_latitude" },
+        { "lon", "gps_longitude" },   { "is_charging", "CHARGING" },
+        { "is_dcfc", "CHARGING_DC" }, { "is_parked", "PARK_BRAKE" },
+    };
+
+    cJSON *out = cJSON_CreateObject();
+    cJSON *tlm = dd_abrp_tlm(snapshot, NULL, 0);
+
+    if (out == NULL || tlm == NULL)
+    {
+        cJSON_Delete(tlm);
+        cJSON_Delete(out);
+        return NULL;
+    }
+
+    cJSON *present = cJSON_AddArrayToObject(out, "present");
+    cJSON *missing = cJSON_AddArrayToObject(out, "missing");
+
+    for (const cJSON *it = tlm->child; it != NULL && present != NULL;
+         it = it->next)
+    {
+        cJSON_AddItemToArray(present, cJSON_CreateString(it->string));
+    }
+
+    for (size_t i = 0;
+         missing != NULL && i < sizeof(WANTED) / sizeof(WANTED[0]); i++)
+    {
+        if (cJSON_GetObjectItemCaseSensitive(tlm, WANTED[i].field) != NULL)
+        {
+            continue;
+        }
+
+        cJSON *m = cJSON_CreateObject();
+
+        if (m != NULL)
+        {
+            cJSON_AddStringToObject(m, "field", WANTED[i].field);
+            cJSON_AddStringToObject(m, "parameter", WANTED[i].parameter);
+            cJSON_AddItemToArray(missing, m);
+        }
+    }
+
+    cJSON_Delete(tlm);
+    return out;
 }

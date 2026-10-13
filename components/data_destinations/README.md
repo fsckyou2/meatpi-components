@@ -27,12 +27,17 @@ stays with the rules engine (`event_manager` `timer.tick` →
 | `data_destinations_init()` | Settings (`data_destinations`) + log descriptors. No I/O. |
 | `data_destinations_start()` / `_stop()` | The poster task (PSRAM stack, 32 KB); refuses `ESP_ERR_INVALID_STATE` when unconfigured (§4.3 step 5). |
 | `data_destinations_status(&json)` | The `/api/destinations` document: `enabled`, `running`, `network`, `mqtt` + per destination `name,type,enabled,url,period_s,auth,has_token,has_api_key,cert_set,success,fail,skipped_offline,consecutive_failures,backoff_s,next_in_s,last_status,last_error,last_error_time,last_ok_time,full_sent`. Secrets never appear. |
+| `data_destinations_abrp_coverage(&json)` | The `/api/destinations/abrp` document: `present` (ABRP fields the live snapshot provides), `missing` (`{field, parameter}`: the autopid name that would fill each high-priority field), `period_floor_s`, `request_gap_ms`. |
 | `data_destinations_test(name, &result)` | Deliver once now on the poster's stack (SYNCHRONOUS, ≤ 20 s): `ok`, HTTP `status`, `elapsed_ms`, `error`. `ESP_ERR_NOT_FOUND` / `_INVALID_STATE` (busy or poster down) / `_TIMEOUT`. |
 | `data_destinations_register_http()` / `_register_cli()` | Own routes (§6e14) / the `destinations` command (self-registered on settings apply behind `cli`, §6b). |
 
 ## Behavior
 
-- **One poster task, 1 s laps.** For every enabled destination that is
+- **One poster task, 1 s laps.** A row's period counts from the START of
+  its delivery (not its end: a 5 s ABRP row then sent every 7.5 s, its
+  1.8 s TLS round trip plus the queue; fixed 2026-10-13), so a 5 s row
+  sends every 5 to 6 s; a delivery slower than its period is followed by
+  the next one at once. For every enabled destination that is
   DUE: MQTT needs the broker connected, HTTP/HTTPS/ABRP need a network
   (`DEV_STATUS_NETWORK_CONNECTED_MASK`, i.e. STA or USB-Ethernet). A
   down link is a **skipped lap** (`skipped_offline`, next lap after the
@@ -44,12 +49,28 @@ stays with the rules engine (`event_manager` `timer.tick` →
   error, non-2xx, ABRP `status != ok`) counts in `fail` +
   `consecutive_failures`; from the 3rd consecutive failure the interval
   doubles from 10 s up to `max(8 × period, 60 s)` (never above 10 min);
-  the first success resets it. The transition logs once at `W`
+  the first success resets it; an HTTP **429** (rate limited) goes to that
+  cap at once, not after three tries (logged once at `W`). The transition logs once at `W`
   (`delivery failed: http=503`), the ladder start once (`3 consecutive
   failures - backing off to 10s`), recovery at `I`; per-attempt detail
   is `D`. The IDF HTTP client itself still prints its `esp-tls` /
   `HTTP_CLIENT` connect-failure lines at E for an unreachable host
   (the bench whitelist).
+- **ABRP rate guard (2026-10-13).** Iternio allows 2 requests per second
+  per api_key and takes one point per 5 s: an ABRP row runs at **5 s at
+  least** (a shorter stored period is applied as 5, never rejected), and
+  the device starts ABRP requests **at least 2.5 s apart**, the Test
+  button included (a due row and a Test both wait for the gap on the
+  poster, at most 2.5 s; a pacer that skipped the lap instead starved the
+  third ABRP row of a table for good), so no table or click pattern
+  passes a fifth of the limit. The status document's `abrp_pacer`
+  (`gap_ms`, `waits`, `waited_ms`, `last_request_age_s`) shows the pacer
+  at work. `GET
+  /api/destinations/abrp` says which of ABRP's main fields the live
+  snapshot provides and which parameter name would fill a missing one
+  (`soc` from `SOC`, `power` from `HV_W`, `is_charging` from `CHARGING`,
+  ...); the UI shows it under the row, because a profile without those
+  names gives ABRP a position and nothing to plan with.
 - **Payloads.** MQTT: the flat `{"Name": value, …, "timestamp": epoch}`
   snapshot, retained by default (`retain`), `~/x` → `<prefix>/x`.
   HTTP(S): with `full_first` (default) the FIRST successful push
@@ -72,7 +93,12 @@ stays with the rules engine (`event_manager` `timer.tick` →
   when the vehicle has no `SPEED`), `utc` (device clock) and
   `car_model` (the ABRP model id, per destination). Iternio answers
   `{"status":"ok"}`; any other `status` is a failure even on HTTP 200
-  (`last_error` = `abrp: error ["missing utc"]`). Checked against the
+  (`last_error` = `abrp: error ["missing utc"]`); a refused key or
+  token is HTTP 401 with `{"status":"error","errortext":"Unauthorized
+  Key"}` / `"Unauthorized Token"` (`last_error` = `abrp: error
+  "Unauthorized Token"`, `last_status` 401; seen live 2026-10-13: the
+  detail is read from `missing`, `errors`, `errortext` or `error`, in
+  that order). Checked against the
   Iternio doc 2026-09-19: values are passed through UNCONVERTED, so the
   vehicle profile must already use ABRP's units and signs, `power` in
   kW with driving positive / charging NEGATIVE, `current` in A,
@@ -118,7 +144,7 @@ make the order non-critical).
 | `type` | `mqtt` \| `http` \| `https` \| `abrp`, required | `mqtt` | |
 | `enabled` | bool | true | pause without deleting |
 | `url` | string ≤ 255 | `""` | MQTT topic (`~/autopid` when empty), URL (a bare host gets the type's scheme; `https` refuses `http://`), ABRP endpoint (Iternio's when empty) |
-| `period_s` | 1..86400 | 5 | cycle |
+| `period_s` | 1..86400 | 5 | cycle; an ABRP row runs at 5 s at least (a shorter value is applied as 5) |
 | `auth` | `none` \| `bearer` \| `api_key_header` \| `api_key_query` \| `basic` | `none` | HTTP(S): how `auth_token` is sent; ABRP: `api_key_header` switches the api_key from the query string to the header |
 | `auth_token` | ≤ 255, secret | `""` | bearer / API-key value; **ABRP user token** (required there) |
 | `auth_name` | ≤ 63 | `x-api-key` / `api_key` / `Authorization` | header or query-parameter name for the API-key modes |
@@ -163,7 +189,7 @@ counters are RAM only.
 
 ## Testing
 
-- Host: `.\test.ps1 host data_destinations`, 17 Unity tests
+- Host: `.\test.ps1 host data_destinations`, 20 Unity tests
   (`host_test/README.md`).
 - Bench: `python tools/testbench/system/data_destinations_bench.py`
   (`DATA DEST PASS`), MQTT / HTTP / HTTPS with a cert set (and without:
@@ -171,3 +197,8 @@ counters are RAM only.
   the token + api_key + tlm contract; the server-down backoff, the
   broker-down and WiFi-down / reconnect scenarios, counters and the
   E-line whitelist. See `TESTING.md`.
+- Live: `.\test.ps1 abrp` (`tools/testbench/system/abrp_live_bench.py`,
+  `ABRP LIVE PASS`): the ABRP rows against the real Iternio API with
+  the credentials in `internal/abrp_credentials.json` (gitignored:
+  `api_key` + the vehicle's `user_token`); without a token only the
+  refusal path runs (`ABRP LIVE PARTIAL PASS`). See `TESTING.md`.
