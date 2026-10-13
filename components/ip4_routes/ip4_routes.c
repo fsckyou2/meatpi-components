@@ -29,6 +29,7 @@
 
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "lwip/ip4_addr.h"
@@ -42,7 +43,8 @@ static const char *TAG = "ip4_routes";
 
 /* internal: the routing hot path reads it for every outbound packet
    (16 x 12 bytes) */
-static ip4_routes_slot_t s_table[IP4_ROUTES_MAX];
+/* PSRAM: read by the tcpip task, never from an ISR */
+static ip4_routes_slot_t s_table[IP4_ROUTES_MAX] EXT_RAM_BSS_ATTR;
 static size_t s_count;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
