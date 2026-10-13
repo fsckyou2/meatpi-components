@@ -55,19 +55,32 @@ it is the `settings` part alone.
 ## The copies
 
 `/data/backups/latest/` and `/sd/backups/wican-<id>/latest/`: `manifest.json`
-(`wican_copy`, `device_id`, `fw_version`, `refreshed` epoch, a keyed HMAC and
-the plain size per part) and one `<part>.enc` per part (`WCBS`, format 1, a
+(`wican_copy`, `device_id`, `fw_version`, `refreshed` epoch, and per part a
+keyed HMAC, the plain size and, since 2026-10-13, the CRC-32 of the sealed
+file as written) and one `<part>.enc` per part (`WCBS`, format 1, a
 12-byte nonce, ciphertext||tag; AAD `wican_copy:1:<device_id>:<part>`). The
 HMAC is HMAC-SHA256 over the plain part keyed with the backup key, so the
 manifest leaks nothing and the sweep compares without unsealing.
 
-The worker (`cb_copies`, a static task on an 8 KB internal stack: every
-filesystem call needs one, reads included) sweeps 20 s after start, about 5 s
+The worker (`cb_copies`, a static task on an 8 KB PSRAM stack since
+2026-10-13: the filesystem runs every `/data` operation of a PSRAM-stack
+caller on its own internal-stack task, reads included, and the PSA work and
+the SD writes never needed internal RAM; a file inside a part is read whole
+into PSRAM for that reason, never streamed: a stream from `filesystem_open()`
+stays on the caller's stack, which is where the first build panicked)
+sweeps 20 s after start, about 5 s
 after `config_backup_touch()` (api_http calls it after an fs upload or
 delete; touches collapse), and every 120 s otherwise while `auto_copy` is on.
 A sweep builds every part, HMACs it, and seals and writes only a part whose
 HMAC differs from the manifest; the manifest is rewritten when a part was.
-A steady state writes nothing (standard section 11). A manual refresh
+A steady state writes nothing (standard section 11). The first sweep of a
+boot reads every part file and checks it against the manifest's CRC; a part
+that differs, is unreadable, or whose manifest predates the CRC is rewritten
+(found 2026-10-13 by the bench: a restart between a part's write and the
+manifest's left a part the manifest did not describe, and once the setting
+moved back the HMAC compare said "equal" and the stale part was restored,
+`auto_copy=false` out of a copy taken while the store said so). A restore
+refuses a part whose file does not match its manifest's CRC. A manual refresh
 (`POST /api/backup/copies/refresh`, `backup -r`) also rewrites the manifest
 so its time moves. A card that comes back is re-read; a card written by
 another WiCAN (exactly one other `wican-<id>` folder) is offered for restore
@@ -132,9 +145,12 @@ api_http depends on this component for the touch.
 
 ## Memory footprint (estimated, 2026-10-11)
 
-- Internal RAM: the worker's 8 KB stack, two static FreeRTOS objects, the
-  32-byte key, about 0.5 KB of state.
-- PSRAM: the two manifests (about 0.5 KB), the staged restore slot header;
+- Internal RAM: three static FreeRTOS objects, the 32-byte key, about
+  0.5 KB of state (the worker's 8 KB stack sat here until 2026-10-13: it
+  was the largest single item of the internal RAM lost between the alfa-01
+  and alfa-04 builds, 8.8 KB of the 11.6 KB of static growth).
+- PSRAM: the worker's 8 KB stack, the two manifests (about 0.5 KB), the
+  staged restore slot header;
   during a sweep one part at a time (the plain part, its sealed twin: twice
   the largest part, about 400 KB with a 180 KB database set), during a
   download the whole document and, encrypted, its ciphertext (two documents
@@ -153,7 +169,8 @@ api_http depends on this component for the touch.
 | `config_backup_crypto.c` | the key in NVS, AES-256-GCM and HMAC through the PSA API, base64 |
 | `config_backup_files.c` | the growable PSRAM buffer, files into PSRAM, a directory into a list, JSON files verbatim, files as base64, a directory wipe |
 | `config_backup_doc.c` | the six part builders, the whole document, the counts of the status route |
-| `config_backup_copies.c` | the copies worker and its sweep, the manifests, the folders, a copy loaded for a restore |
+| `config_backup_copies.c` | the copies worker and its sweep, the manifests (with the CRC of each sealed file, verified at the first sweep of a boot), the folders |
+| `config_backup_copies_read.c` | the status route's view of the copies, the folder a restore reads from, a copy loaded for a restore (each part checked against the manifest's CRC) |
 | `config_backup_restore.c` | the staged slot, the header, the unseal, the index, the dry run, the manifest, the apply |
 | `config_backup_apply.c` | one part at a time: the dry run and the apply with the keep rules |
 | `config_backup_http.c` | the `/api/backup` routes |
@@ -162,7 +179,7 @@ api_http depends on this component for the touch.
 
 ## Testing
 
-- Host: `host_test/` (21 tests: the scanner, the redaction rule and its
+- Host: `host_test/` (22 tests: the CRC-32 vectors, the scanner, the redaction rule and its
   inverse, the names, the key file, the manifest, a document indexed, a
   version-1 document, a 64 KB string skipped). `filesystem/host_test` covers
   `filesystem_api_hidden`.

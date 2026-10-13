@@ -286,6 +286,14 @@ static void test_hex_round_trip(void)
     TEST_ASSERT_FALSE(cb_hex_decode("zz", 2, out));
 }
 
+static void test_crc32_vectors(void)
+{
+    /* the IEEE check value, the empty input, one byte at a time = one call */
+    TEST_ASSERT_EQUAL_HEX32(0xCBF43926u, cb_crc32((const uint8_t *)"123456789", 9));
+    TEST_ASSERT_EQUAL_HEX32(0x00000000u, cb_crc32((const uint8_t *)"", 0));
+    TEST_ASSERT_EQUAL_HEX32(0x356FF657u, cb_crc32((const uint8_t *)"WCBS", 4));
+}
+
 /* ---- the manifest --------------------------------------------------------------------------- */
 
 static void test_manifest_round_trip(void)
@@ -298,6 +306,7 @@ static void test_manifest_round_trip(void)
     m.refreshed = 1791693028;
     m.parts[CB_PART_SETTINGS].present = true;
     m.parts[CB_PART_SETTINGS].bytes = 7100;
+    m.parts[CB_PART_SETTINGS].crc = 0x9ABCDEF0u;
     memset(m.parts[CB_PART_SETTINGS].hmac, 0xab, CB_HMAC_LEN);
     m.parts[CB_PART_CERTS].present = true;
     m.parts[CB_PART_CERTS].bytes = 2100;
@@ -318,6 +327,8 @@ static void test_manifest_round_trip(void)
     TEST_ASSERT_EQUAL_UINT32(7100, back.parts[CB_PART_SETTINGS].bytes);
     TEST_ASSERT_EQUAL_MEMORY(m.parts[CB_PART_SETTINGS].hmac,
                              back.parts[CB_PART_SETTINGS].hmac, CB_HMAC_LEN);
+    TEST_ASSERT_EQUAL_HEX32(0x9ABCDEF0u, back.parts[CB_PART_SETTINGS].crc);
+    TEST_ASSERT_EQUAL_HEX32(0, back.parts[CB_PART_CERTS].crc); /* unknown */
     TEST_ASSERT_FALSE(back.parts[CB_PART_VEHICLES].present);
     TEST_ASSERT_TRUE(back.parts[CB_PART_CERTS].present);
     TEST_ASSERT_EQUAL_UINT32(9200, cb_manifest_bytes(&back));
@@ -342,6 +353,8 @@ static void test_manifest_rejects_other_versions_and_bad_entries(void)
     TEST_ASSERT_EQUAL(ESP_OK, cb_manifest_from_json(damaged, &m));
     TEST_ASSERT_FALSE(m.parts[CB_PART_SETTINGS].present); /* damaged = rewritten */
     TEST_ASSERT_TRUE(m.parts[CB_PART_SCRIPTS].present);
+    TEST_ASSERT_EQUAL_HEX32(0, m.parts[CB_PART_SCRIPTS].crc); /* no crc: a manifest
+                                                                 from before the check */
     TEST_ASSERT_EQUAL_INT64(0, m.refreshed);
     cJSON_Delete(damaged);
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, cb_manifest_from_json(NULL, &m));
@@ -445,6 +458,7 @@ void app_main(void)
     RUN_TEST(test_key_text_decodes_file_and_bare_hex);
     RUN_TEST(test_key_text_rejects_short_and_junk);
     RUN_TEST(test_hex_round_trip);
+    RUN_TEST(test_crc32_vectors);
     RUN_TEST(test_manifest_round_trip);
     RUN_TEST(test_manifest_rejects_other_versions_and_bad_entries);
     RUN_TEST(test_iso_time);

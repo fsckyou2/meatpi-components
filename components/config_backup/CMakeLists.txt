@@ -6,6 +6,7 @@ idf_component_register(
          "config_backup_files.c"
          "config_backup_doc.c"
          "config_backup_copies.c"
+         "config_backup_copies_read.c"
          "config_backup_restore.c"
          "config_backup_apply.c"
          "config_backup_http.c"

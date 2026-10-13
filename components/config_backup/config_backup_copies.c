@@ -30,7 +30,9 @@
  *        every part is built and HMAC'd, only a part whose HMAC differs
  *        from the manifest is sealed and written (standard section 11: a
  *        steady state writes nothing). A manual refresh writes the manifest
- *        even when no part changed, so its time moves.
+ *        even when no part changed, so its time moves. The read side (the
+ *        status, the restore source, the copy loader) lives in
+ *        config_backup_copies_read.c since 2026-10-13.
  */
 #include <stdio.h>
 #include <string.h>
@@ -50,10 +52,12 @@
 
 static const char *TAG = "config_backup";
 
-#define FILE_HDR_LEN (4 + 1 + CB_NONCE_LEN) /* magic, format, nonce */
-
-static StaticTask_t      s_tcb;
-static StackType_t       s_stack[8192]; /* internal: filesystem + PSA (§2) */
+static StaticTask_t      s_tcb;         /* internal: FreeRTOS object */
+/* PSRAM since 2026-10-13: the filesystem runs every /data operation of a
+ * PSRAM-stack caller on its own internal-stack task (filesystem.h); the
+ * PSA work and the SD writes never needed internal RAM. Before that the
+ * 8 KB sat in internal RAM for the life of the firmware. */
+static StackType_t       s_stack[8192] EXT_RAM_BSS_ATTR;
 static TaskHandle_t      s_task;
 static SemaphoreHandle_t s_done;
 static StaticSemaphore_t s_done_buf;    /* internal: FreeRTOS object */
@@ -144,7 +148,7 @@ static esp_err_t seal_part(cb_part_t p, const char *dev, const char *plain,
                            size_t len, uint8_t **out, size_t *out_len)
 {
     char    aad[64];
-    size_t  size = FILE_HDR_LEN + len + CB_TAG_LEN;
+    size_t  size = CB_FILE_HDR_LEN + len + CB_TAG_LEN;
     uint8_t *buf = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
     if (buf == NULL)
@@ -159,7 +163,7 @@ static esp_err_t seal_part(cb_part_t p, const char *dev, const char *plain,
 
     size_t    clen = 0;
     esp_err_t err = cb_seal(cb_device_key(), aad, (const uint8_t *)plain, len,
-                            buf + 5, buf + FILE_HDR_LEN, size - FILE_HDR_LEN,
+                            buf + 5, buf + CB_FILE_HDR_LEN, size - CB_FILE_HDR_LEN,
                             &clen);
 
     if (err != ESP_OK)
@@ -169,11 +173,50 @@ static esp_err_t seal_part(cb_part_t p, const char *dev, const char *plain,
     }
 
     *out = buf;
-    *out_len = FILE_HDR_LEN + clen;
+    *out_len = CB_FILE_HDR_LEN + clen;
     return ESP_OK;
 }
 
 /* ---- the sweep ------------------------------------------------------------------------ */
+
+/* The files against the manifest, once per boot (2026-10-13): a restart
+ * between a part's write and the manifest's leaves a part the manifest
+ * does not describe, and when the setting then moves back the HMAC
+ * compare says "equal" and the stale part is served forever (the config
+ * backup bench restored auto_copy=false out of such a copy). A part whose
+ * file is missing, unreadable or of another CRC than recorded, or whose
+ * manifest predates the CRC, reads as absent: the sweep rewrites it. */
+static void verify_parts(const char *dir, cb_manifest_t *m)
+{
+    for (int p = 0; p < CB_PART_COUNT; p++)
+    {
+        if (!m->parts[p].present)
+        {
+            continue;
+        }
+
+        char   path[128];
+        char  *raw = NULL;
+        size_t len = 0;
+        bool   ok = false;
+
+        part_path(dir, (cb_part_t)p, path, sizeof(path));
+
+        if (cb_read_file(path, &raw, &len, CB_DOC_MAX) == ESP_OK)
+        {
+            ok = m->parts[p].crc != 0 &&
+                 cb_crc32((const uint8_t *)raw, len) == m->parts[p].crc;
+            free(raw);
+        }
+
+        if (!ok)
+        {
+            ESP_LOGI(TAG, "copies: %s/%s does not match its manifest; "
+                     "rewritten", dir, CB_PART_NAMES[p]);
+            m->parts[p].present = false;
+        }
+    }
+}
 
 static void sweep(bool force)
 {
@@ -189,11 +232,13 @@ static void sweep(bool force)
     if (!s_mf_int.loaded)
     {
         (void)cb_copies_read_manifest(CB_DIR_INTERNAL, &s_mf_int);
+        verify_parts(CB_DIR_INTERNAL, &s_mf_int);
     }
 
     if (sd && !s_mf_sd.loaded)
     {
         (void)cb_copies_read_manifest(sd_dir, &s_mf_sd);
+        verify_parts(sd_dir, &s_mf_sd);
     }
 
     if (!sd)
@@ -249,7 +294,8 @@ static void sweep(bool force)
             continue;
         }
 
-        char path[128];
+        char     path[128];
+        uint32_t crc = cb_crc32(sealed, sealed_len); /* the file as written */
 
         if (need_int)
         {
@@ -259,6 +305,7 @@ static void sweep(bool force)
             {
                 s_mf_int.parts[p].present = true;
                 s_mf_int.parts[p].bytes = (uint32_t)plain.len;
+                s_mf_int.parts[p].crc = crc;
                 memcpy(s_mf_int.parts[p].hmac, mac, CB_HMAC_LEN);
                 wrote_int = true;
             }
@@ -276,6 +323,7 @@ static void sweep(bool force)
             {
                 s_mf_sd.parts[p].present = true;
                 s_mf_sd.parts[p].bytes = (uint32_t)plain.len;
+                s_mf_sd.parts[p].crc = crc;
                 memcpy(s_mf_sd.parts[p].hmac, mac, CB_HMAC_LEN);
                 wrote_sd = true;
             }
@@ -439,252 +487,35 @@ esp_err_t cb_copies_refresh(uint32_t wait_ms, cJSON *written)
     return ESP_OK;
 }
 
-/* a card that served another WiCAN: its folder on the card, if exactly one */
-typedef struct
+/* ---- lent to the read side (config_backup_copies_read.c) ------------------------- */
+
+void cb_copies_lock(void)
 {
-    char other[CB_ID_LEN];
-    int  count;
-} other_t;
-
-static esp_err_t other_cb(const char *name, bool is_dir, size_t size, void *ctx)
-{
-    other_t *o = ctx;
-
-    (void)size;
-
-    if (is_dir && strncmp(name, "wican-", 6) == 0 &&
-        strcmp(name + 6, cb_device_id()) != 0 && strlen(name + 6) < CB_ID_LEN)
-    {
-        snprintf(o->other, sizeof(o->other), "%s", name + 6);
-        o->count++;
-    }
-
-    return ESP_OK;
-}
-
-static void copy_status(cJSON *into, const cb_manifest_t *m, bool loaded)
-{
-    bool present = loaded && cb_manifest_count(m) > 0;
-    char iso[CB_ISO_LEN];
-
-    cb_iso_from_epoch(present ? m->refreshed : 0, iso);
-    cJSON_AddBoolToObject(into, "present", present);
-    cJSON_AddStringToObject(into, "refreshed", iso);
-    cJSON_AddNumberToObject(into, "bytes", present ? cb_manifest_bytes(m) : 0);
-    cJSON_AddNumberToObject(into, "parts", present ? cb_manifest_count(m) : 0);
-    cJSON_AddStringToObject(into, "fw_version", present ? m->fw : "");
-}
-
-void cb_copies_status(cJSON *into)
-{
-    bool   sd = dev_status_manager_is_set(DEV_STATUS_BIT_SDCARD_MOUNTED);
-    cJSON *in = cJSON_AddObjectToObject(into, "internal");
-    cJSON *sdj = cJSON_AddObjectToObject(into, "sd");
-
-    cJSON_AddBoolToObject(into, "auto", cb_settings_auto_copy());
-
     if (s_lock != NULL)
     {
         xSemaphoreTake(s_lock, portMAX_DELAY);
     }
+}
 
-    copy_status(in, &s_mf_int, s_mf_int.loaded);
-    cJSON_AddBoolToObject(sdj, "card", sd);
-
-    if (sd)
-    {
-        bool own = s_mf_sd.loaded && cb_manifest_count(&s_mf_sd) > 0;
-
-        copy_status(sdj, &s_mf_sd, s_mf_sd.loaded);
-
-        if (own)
-        {
-            cJSON_AddStringToObject(sdj, "device_id", s_mf_sd.device_id);
-        }
-        else
-        {
-            other_t o = { .count = 0 };
-
-            (void)filesystem_list(CB_DIR_SD_ROOT, other_cb, &o);
-
-            if (o.count == 1)
-            {
-                cb_manifest_t om;
-                char          dir[80];
-
-                snprintf(dir, sizeof(dir), CB_DIR_SD_FMT, o.other);
-
-                if (cb_copies_read_manifest(dir, &om) == ESP_OK)
-                {
-                    cJSON_DeleteItemFromObject(sdj, "present");
-                    cJSON_DeleteItemFromObject(sdj, "refreshed");
-                    cJSON_DeleteItemFromObject(sdj, "bytes");
-                    cJSON_DeleteItemFromObject(sdj, "parts");
-                    cJSON_DeleteItemFromObject(sdj, "fw_version");
-                    copy_status(sdj, &om, true);
-                    cJSON_AddStringToObject(sdj, "device_id", o.other);
-                }
-            }
-        }
-
-        uint64_t total = 0;
-        uint64_t free_b = 0;
-
-        if (esp_vfs_fat_info("/sd", &total, &free_b) == ESP_OK)
-        {
-            cJSON_AddNumberToObject(sdj, "free_bytes", (double)free_b);
-        }
-    }
-    else
-    {
-        cJSON_AddBoolToObject(sdj, "present", false);
-    }
-
+void cb_copies_unlock(void)
+{
     if (s_lock != NULL)
     {
         xSemaphoreGive(s_lock);
     }
 }
 
-esp_err_t cb_copies_dir(const char *where, char *out, size_t out_len,
-                        char device_id[CB_ID_LEN])
+const cb_manifest_t *cb_copies_manifest(bool sd)
 {
-    if (strcmp(where, "internal") == 0)
-    {
-        snprintf(out, out_len, "%s", CB_DIR_INTERNAL);
-        snprintf(device_id, CB_ID_LEN, "%s", cb_device_id());
-        return ESP_OK;
-    }
-
-    if (strcmp(where, "sd") != 0)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (!dev_status_manager_is_set(DEV_STATUS_BIT_SDCARD_MOUNTED))
-    {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    char own[80];
-    char path[128];
-
-    sd_dir_own(own, sizeof(own));
-    snprintf(path, sizeof(path), "%s/" CB_MANIFEST_NAME, own);
-
-    if (filesystem_exists(path))
-    {
-        snprintf(out, out_len, "%s", own);
-        snprintf(device_id, CB_ID_LEN, "%s", cb_device_id());
-        return ESP_OK;
-    }
-
-    other_t o = { .count = 0 };
-
-    (void)filesystem_list(CB_DIR_SD_ROOT, other_cb, &o);
-
-    if (o.count != 1)
-    {
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    snprintf(out, out_len, CB_DIR_SD_FMT, o.other);
-    snprintf(device_id, CB_ID_LEN, "%s", o.other);
-    return ESP_OK;
+    return sd ? &s_mf_sd : &s_mf_int;
 }
 
-esp_err_t cb_copies_load_doc(const char *dir, const uint8_t *key,
-                             const cb_manifest_t *m, cb_buf_t *doc)
+void cb_copies_sd_dir(char *out, size_t n)
 {
-    bool own = strcmp(m->device_id, cb_device_id()) == 0;
+    sd_dir_own(out, n);
+}
 
-    if (own)
-    {
-        key = cb_device_key();
-    }
-
-    if (key == NULL)
-    {
-        return ESP_ERR_INVALID_STATE; /* locked */
-    }
-
-    char iso[CB_ISO_LEN];
-
-    cb_iso_from_epoch(m->refreshed, iso);
-
-    esp_err_t err = cb_buf_printf(doc,
-                                  "{\"wican_backup\":%u,\"device_id\":\"%s\","
-                                  "\"fw_version\":\"%s\",\"created\":\"%s\","
-                                  "\"redacted\":false,\"parts\":{",
-                                  CB_DOC_VERSION, m->device_id, m->fw, iso);
-    bool first = true;
-
-    for (int p = 0; p < CB_PART_COUNT && err == ESP_OK; p++)
-    {
-        if (!m->parts[p].present)
-        {
-            continue;
-        }
-
-        char   path[128];
-        char  *raw = NULL;
-        size_t raw_len = 0;
-
-        part_path(dir, (cb_part_t)p, path, sizeof(path));
-        err = cb_read_file(path, &raw, &raw_len, CB_DOC_MAX);
-
-        if (err != ESP_OK)
-        {
-            break;
-        }
-
-        if (raw_len < FILE_HDR_LEN + CB_TAG_LEN ||
-            memcmp(raw, CB_FILE_MAGIC, 4) != 0 || raw[4] != CB_COPY_VERSION)
-        {
-            free(raw);
-            err = ESP_ERR_INVALID_CRC;
-            break;
-        }
-
-        char     aad[64];
-        size_t   plen = 0;
-        size_t   psize = raw_len - FILE_HDR_LEN - CB_TAG_LEN + 1;
-        uint8_t *plain = heap_caps_malloc(psize, MALLOC_CAP_SPIRAM |
-                                                     MALLOC_CAP_8BIT);
-
-        if (plain == NULL)
-        {
-            free(raw);
-            err = ESP_ERR_NO_MEM;
-            break;
-        }
-
-        snprintf(aad, sizeof(aad), "wican_copy:%u:%s:%s", CB_COPY_VERSION,
-                 m->device_id, CB_PART_NAMES[p]);
-        err = cb_unseal(key, aad, (const uint8_t *)raw + 5,
-                        (const uint8_t *)raw + FILE_HDR_LEN,
-                        raw_len - FILE_HDR_LEN, plain, psize, &plen);
-        free(raw);
-
-        if (err == ESP_OK)
-        {
-            err = cb_buf_printf(doc, "%s\"%s\":", first ? "" : ",",
-                                CB_PART_NAMES[p]);
-        }
-
-        if (err == ESP_OK)
-        {
-            err = cb_buf_append(doc, plain, plen);
-        }
-
-        free(plain);
-        first = false;
-    }
-
-    if (err == ESP_OK)
-    {
-        err = cb_buf_puts(doc, "}}");
-    }
-
-    return err;
+void cb_copies_part_path(const char *dir, cb_part_t p, char *out, size_t n)
+{
+    part_path(dir, p, out, n);
 }

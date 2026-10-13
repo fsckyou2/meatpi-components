@@ -352,14 +352,21 @@ esp_err_t cb_append_file_b64(cb_buf_t *b, const char *dir, const char *name,
         return ESP_ERR_INVALID_SIZE;
     }
 
-    FILE *f = filesystem_open(path, "rb");
+    /* the whole file into PSRAM through filesystem_read (the copies worker
+       runs on a PSRAM stack: the filesystem marshals that read onto its
+       internal-stack task, which a stdio stream from filesystem_open()
+       cannot be: the first build of 2026-10-13 panicked right here in
+       lfs_file_opencfg, caught by the config backup bench) */
+    char  *raw = NULL;
+    size_t len = 0;
+    esp_err_t err = cb_read_file(path, &raw, &len, CB_FILE_MAX);
 
-    if (f == NULL)
+    if (err != ESP_OK)
     {
-        return ESP_ERR_NOT_FOUND;
+        return (err == ESP_ERR_INVALID_SIZE) ? err : ESP_ERR_NOT_FOUND;
     }
 
-    esp_err_t err = cb_buf_puts(b, "{\"name\":");
+    err = cb_buf_puts(b, "{\"name\":");
 
     if (err == ESP_OK)
     {
@@ -368,30 +375,24 @@ esp_err_t cb_append_file_b64(cb_buf_t *b, const char *dir, const char *name,
 
     if (err == ESP_OK)
     {
-        err = cb_buf_printf(b, ",\"size\":%u,\"b64\":\"", (unsigned)size);
+        err = cb_buf_printf(b, ",\"size\":%u,\"b64\":\"", (unsigned)len);
     }
 
-    uint8_t *raw = heap_caps_malloc(B64_BLOCK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    char    *enc = heap_caps_malloc(cb_b64_size(B64_BLOCK),
-                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *enc = heap_caps_malloc(cb_b64_size(B64_BLOCK),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
-    if (raw == NULL || enc == NULL)
+    if (enc == NULL)
     {
         err = ESP_ERR_NO_MEM;
     }
 
-    while (err == ESP_OK)
+    for (size_t off = 0; err == ESP_OK && off < len; off += B64_BLOCK)
     {
-        size_t n = fread(raw, 1, B64_BLOCK, f);
-
-        if (n == 0)
-        {
-            break;
-        }
-
+        size_t n = (len - off > B64_BLOCK) ? B64_BLOCK : len - off;
         size_t olen = 0;
 
-        err = cb_b64_encode(raw, n, enc, cb_b64_size(B64_BLOCK), &olen);
+        err = cb_b64_encode((const uint8_t *)raw + off, n, enc,
+                            cb_b64_size(B64_BLOCK), &olen);
 
         if (err == ESP_OK)
         {
@@ -399,9 +400,8 @@ esp_err_t cb_append_file_b64(cb_buf_t *b, const char *dir, const char *name,
         }
     }
 
-    fclose(f);
-    free(raw);
     free(enc);
+    free(raw);
 
     if (err == ESP_OK)
     {

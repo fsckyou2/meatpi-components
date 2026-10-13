@@ -80,6 +80,7 @@ extern const char *const CB_PART_NAMES[CB_PART_COUNT];
 #define CB_MANIFEST_NAME  "manifest.json"
 #define CB_PART_EXT       ".enc"
 #define CB_FILE_MAGIC     "WCBS"
+#define CB_FILE_HDR_LEN   (4 + 1 + CB_NONCE_LEN)  /* magic, format, nonce */
 
 #define CB_BOOT_DELAY_MS    20000
 #define CB_TOUCH_DELAY_MS   5000
@@ -194,6 +195,10 @@ bool cb_vehicle_key_ok(const char *name, size_t len);
 bool cb_key_text_decode(const char *text, size_t len, uint8_t key[CB_KEY_LEN]);
 void cb_hex_encode(const uint8_t *in, size_t n, char *out /* 2n+1 */);
 bool cb_hex_decode(const char *in, size_t n_chars, uint8_t *out);
+/** CRC-32 (IEEE, 0xEDB88320) of the sealed part file as written: the
+ *  manifest records it, the first sweep of a boot verifies the file
+ *  against it, a restore refuses a part that does not match. */
+uint32_t cb_crc32(const uint8_t *p, size_t n);
 
 /** Epoch -> "YYYY-MM-DDTHH:MM:SSZ"; 0 -> "". */
 void cb_iso_from_epoch(int64_t t, char out[CB_ISO_LEN]);
@@ -203,6 +208,9 @@ typedef struct
 {
     bool     present;
     uint32_t bytes;               /* the plain part */
+    uint32_t crc;                 /* CRC-32 of the sealed file; 0 = not
+                                     recorded (a manifest from before
+                                     2026-10-13): rewritten once */
     uint8_t  hmac[CB_HMAC_LEN];   /* HMAC-SHA256 of the plain part, keyed */
 } cb_manifest_part_t;
 
@@ -261,7 +269,7 @@ esp_err_t cb_doc_build(uint32_t mask, bool redact, cb_buf_t *out);
 /** Counts and bytes of one part, as the status route reports them. */
 esp_err_t cb_doc_part_status(cb_part_t part, cJSON *into);
 
-/* ---- the copies (config_backup_copies.c) ------------------------------------------- */
+/* ---- the copies (config_backup_copies.c, config_backup_copies_read.c) ------------- */
 
 esp_err_t cb_copies_start(void);
 void      cb_copies_stop(void);
@@ -274,6 +282,12 @@ void      cb_copies_status(cJSON *into);
 esp_err_t cb_copies_dir(const char *where, char *out, size_t out_len,
                         char device_id[CB_ID_LEN]);
 esp_err_t cb_copies_read_manifest(const char *dir, cb_manifest_t *m);
+/* the writer side lends these to config_backup_copies_read.c */
+void      cb_copies_lock(void);
+void      cb_copies_unlock(void);
+const cb_manifest_t *cb_copies_manifest(bool sd);  /* under the lock */
+void      cb_copies_sd_dir(char *out, size_t n);   /* this device on the card */
+void      cb_copies_part_path(const char *dir, cb_part_t p, char *out, size_t n);
 /** Assemble a plain document from a copy's sealed parts; ESP_ERR_INVALID_STATE
  *  when the folder belongs to another device and @p key is NULL;
  *  ESP_ERR_INVALID_CRC when a part fails its tag. */
