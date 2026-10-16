@@ -10,11 +10,15 @@
 
 /* esp_reset_reason_t, the IDF 5+ numbering (restart_tracker_core.c) */
 #define RST_POWERON   1U
+#define RST_EXT       2U
 #define RST_SW        3U
 #define RST_PANIC     4U
 #define RST_INTWDT    5U
 #define RST_TASKWDT   6U
 #define RST_DEEPSLEEP 8U
+#define RST_BROWNOUT  9U
+#define RST_USB       11U
+#define RST_JTAG      12U
 
 #define GOOD_TIME 1780000000LL /* well past the 2024 sanity floor */
 
@@ -125,6 +129,34 @@ void test_unexpected_reason_classification(void)
                     RESTART_TRACKER_SOURCE_OTA, 0);
     rt_record_boot(&s_state, &panic);
     TEST_ASSERT_EQUAL_UINT32(3, s_state.unexpected_reset_count);
+
+    /* deliberate external causes (2026-10-17): the EN pin, a deep-sleep
+     * wake, the USB-Serial-JTAG reset esptool issues after a flash over the
+     * native USB port, a debugger. None of them is a fault. */
+    rt_inputs_t ext = in(RST_EXT, GOOD_TIME);
+    rt_inputs_t usb = in(RST_USB, GOOD_TIME);
+    rt_inputs_t jtag = in(RST_JTAG, GOOD_TIME);
+
+    rt_record_boot(&s_state, &ext);
+    rt_record_boot(&s_state, &nap);
+    rt_record_boot(&s_state, &usb);
+    rt_record_boot(&s_state, &jtag);
+    TEST_ASSERT_EQUAL_UINT32(3, s_state.unexpected_reset_count);
+
+    /* a brownout is a fault, like the watchdogs */
+    rt_inputs_t brownout = in(RST_BROWNOUT, GOOD_TIME);
+
+    rt_record_boot(&s_state, &brownout);
+    rt_record_boot(&s_state, &iwdt);
+    TEST_ASSERT_EQUAL_UINT32(5, s_state.unexpected_reset_count);
+
+    /* the names follow esp_reset_reason_t to the end of the enum */
+    TEST_ASSERT_EQUAL_STRING("external", restart_tracker_reset_reason_to_str(RST_EXT));
+    TEST_ASSERT_EQUAL_STRING("task_wdt", restart_tracker_reset_reason_to_str(RST_TASKWDT));
+    TEST_ASSERT_EQUAL_STRING("usb", restart_tracker_reset_reason_to_str(RST_USB));
+    TEST_ASSERT_EQUAL_STRING("jtag", restart_tracker_reset_reason_to_str(RST_JTAG));
+    TEST_ASSERT_EQUAL_STRING("cpu_lockup", restart_tracker_reset_reason_to_str(15));
+    TEST_ASSERT_EQUAL_STRING("invalid", restart_tracker_reset_reason_to_str(99));
 }
 
 void test_history_ring_wraps(void)

@@ -299,12 +299,15 @@ legacy `restart_tracker_http.c` was dropped; these routes replace it.
   lookup never returns another boot's note, ring wrap included; the summary
   line of each kind; text made printable. And 8 for the pure core: garbage-memory detection,
   boot recording/counters, planned-intent consumed exactly once, unexpected
-  classification (panic / the three watchdogs yes; sw / poweron / deepsleep
-  no; planned never) on the IDF 5+ reason numbers (INT_WDT 5, TASK_WDT 6,
-  WDT 7, DEEPSLEEP 8, BROWNOUT 9: until 2026-10-03 the core carried IDF 4's,
-  and an interrupt-watchdog reset was recorded as "deepsleep" and not counted
-  as unexpected), the reason names, ring wrap, CRC tamper, invalid-clock
-  handling.
+  classification (panic / the three watchdogs / brownout yes; sw / poweron /
+  external / deepsleep / usb / jtag no; planned never) on the IDF 5+ reason
+  numbers (INT_WDT 5, TASK_WDT 6, WDT 7, DEEPSLEEP 8, BROWNOUT 9, USB 11,
+  JTAG 12: until 2026-10-03 the core carried IDF 4's, and an
+  interrupt-watchdog reset was recorded as "deepsleep" and not counted as
+  unexpected; until 2026-10-17 the USB-Serial-JTAG reset esptool issues
+  after a flash over the native USB port, and a debugger's, counted as
+  unexpected: ported from the ESPNetLink production station), the reason
+  names, ring wrap, CRC tamper, invalid-clock handling.
 - **On-target (`test_apps/`, `.\test.ps1 target restart_tracker`):** a
   self-driving app, one step per boot. Step 0 is the **real esp_restart()**
   of old (`.noinit` survival, intent consumption, software-reset

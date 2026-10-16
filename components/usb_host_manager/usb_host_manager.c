@@ -33,11 +33,13 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "dev_status_manager.h"
 #include "log_manager.h"
+#include "usb_dc.h"
 #include "usb_eth_host.h"
 #include "usb_net_device.h"
 #include "usb_cdc_device.h"
@@ -208,6 +210,47 @@ static void presence_task(void *arg)
     }
 }
 
+/* ---- the warm restart in the device role ------------------------------------- */
+
+/* esp_restart runs the shutdown handlers before the reset: drop the device
+ * off the bus first, so the PC sees an unplug and the next image enumerates
+ * with no transfer in flight. Without it the host is never told the device
+ * went away, a transfer stays in flight across the reset, and the next
+ * image can take the stale OUT completion before its class armed a read
+ * (the ESPNetLink crashed that way in ISR context about 5 s after a warm
+ * reboot, 2026-10-16). Soft-disconnect only: the controller stays clocked,
+ * so a task that still sends in the restart window cannot hang on a gated
+ * bus. Hooked once the device core came up (the host role never
+ * initialises it). IDF keeps five shutdown-handler slots: WiFi, esp_timer,
+ * can_manager and data_logger hold four; this is the fifth. */
+static bool s_detach_hooked;
+
+static void uhm_on_shutdown(void)
+{
+    (void)usb_dc_soft_disconnect(0);
+}
+
+static void uhm_hook_restart_detach(void)
+{
+    if (s_detach_hooked)
+    {
+        return;
+    }
+
+    esp_err_t err = esp_register_shutdown_handler(uhm_on_shutdown);
+
+    if (err == ESP_OK)
+    {
+        s_detach_hooked = true;
+    }
+    else
+    {
+        /* no slot left (standard section 12: loud, the boot_errors net sees
+         * it): a warm restart then keeps the PC attached across the reset */
+        ESP_LOGE(TAG, "restart detach not hooked: %s", esp_err_to_name(err));
+    }
+}
+
 /* ---- lifecycle -------------------------------------------------------------- */
 
 esp_err_t usb_host_manager_init(void)
@@ -256,6 +299,7 @@ esp_err_t usb_host_manager_start(void)
                 return ESP_FAIL;
             }
 
+            uhm_hook_restart_detach();
             snprintf(s_status.driver, sizeof(s_status.driver), "cdc-dev");
             ESP_LOGI(TAG, "role=device up (class=cdc, io%d -> ESP OTG)",
                      UHM_MODE_GPIO);
@@ -283,6 +327,8 @@ esp_err_t usb_host_manager_start(void)
             gpio_set_level(UHM_MODE_GPIO, 0);
             return ESP_FAIL;
         }
+
+        uhm_hook_restart_detach();
 
         usb_net_device_status_t dev_st;
 

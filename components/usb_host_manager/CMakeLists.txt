@@ -13,4 +13,5 @@ idf_component_register(
     PRIV_REQUIRES usb_eth_host usb_net_device usb_cdc_device dev_status_manager event_manager
                   http_server_manager settings_manager log_manager
                   cmdline_manager esp_driver_gpio esp_netif
+                  cherryusb   # usb_dc_soft_disconnect(): the restart detach
 )

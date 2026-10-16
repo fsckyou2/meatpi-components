@@ -12,7 +12,7 @@ hooks), IDF `linux` target. Run via `.\test.ps1 host restart_tracker`.
 | random memory is invalid and resets | power-on garbage never masquerades as history (magic/version/CRC) |
 | boot recording and counters | one record per boot; sequence + boot_count advance; valid state adopted |
 | planned restart consumed once | intent recorded into exactly the next boot, then cleared |
-| unexpected classification | panic and the watchdogs count; sw/poweron/deepsleep don't; a planned boot never counts (IDF 5+ reason numbers) |
+| unexpected classification | panic, the watchdogs and a brownout count; sw/poweron/external/deepsleep/usb/jtag don't (usb = esptool's reset after a flash over the native USB port, jtag = a debugger, 2026-10-17); a planned boot never counts (IDF 5+ reason numbers, the names to the end of the enum) |
 | history ring wraps | 8-entry ring arithmetic; newest sequence at latest index |
 | CRC detects tamper | one flipped bit invalidates the state |
 | tuning guard clobber is harmless | the 64 sacrificial bytes may be overwritten at every boot |

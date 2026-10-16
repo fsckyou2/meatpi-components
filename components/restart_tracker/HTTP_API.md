@@ -138,8 +138,14 @@ delivered as their `*_to_str` names, never raw numbers.
 
 - `boot_time`/`request_time` are unix seconds; `0` + `time_valid:false` means
   the wall clock wasn't set yet (pre-NTP boot).
-- `reason` values: `poweron, external, software, panic, deepsleep, brownout,
-  interrupt_wdt, task_wdt, wdt, sdio, unknown`.
+- `reason` values (the `esp_reset_reason_t` names; the list follows the enum
+  since 2026-10-04, `usb` and `jtag` deliberate since 2026-10-17): `poweron,
+  external, software, panic, interrupt_wdt, task_wdt, wdt, deepsleep,
+  brownout, sdio, usb, jtag, efuse, power_glitch, cpu_lockup, unknown`
+  (`invalid` for a value outside the enum). `unexpected_resets` counts a boot
+  whose reason is none of `poweron`, `external`, `software`, `deepsleep`,
+  `usb` (the USB-Serial-JTAG reset esptool issues after a flash over the
+  native USB port) or `jtag` (a debugger), unless the restart was planned.
 - `planned_reason` values include `partition_migrate` (2026-10-10): the boot
   before it rewrote the partition table in flash with this build's (a unit
   updated by OTA from the factory firmware), `source` `boot`.

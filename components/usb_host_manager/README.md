@@ -13,7 +13,19 @@ starts `usb_eth_host` (CherryUSB enumerates the adapter (ASIX / CDC-ECM /
 CDC-NCM / RNDIS) into ONE esp_netif, DHCP or static). On detach
 everything tears down and the mux returns to the CH342. Role `device`
 makes the WiCAN a USB-Ethernet/serial device instead (`usb_net_device`,
-`usb_cdc_device`).
+`usb_cdc_device`). In that role a warm restart (a settings submit, an OTA
+apply, `POST /api/restart`) first drops the device off the bus: an
+`esp_restart` shutdown handler, hooked when the device core came up, calls
+the dwc2 port's `usb_dc_soft_disconnect()` (D+ pull-up off, the controller
+still clocked), so the PC sees an unplug about a second after the request
+and the next image enumerates with no transfer in flight (2026-10-17, from
+the ESPNetLink bench of 2026-10-16: without it the host is never told, a
+transfer stays in flight across the reset, and the next image can take the
+stale completion before its class armed a read; the RNDIS class also guards
+that completion now, `cherryusb/PROVENANCE.md`). The hook takes the fifth of
+IDF's five shutdown-handler slots (WiFi, esp_timer, can_manager and
+data_logger hold the others); a registration failure logs at ERROR. Proof:
+`tools/testbench/usb/usb_detach_bench.py` (`.\test.ps1 usbdetach`).
 
 Uplink semantics: no WiFi/USB arbitration, the wired uplink raises
 `DEV_STATUS_BIT_ETH_CONNECTED`; `prefer_usb_route` (default off =

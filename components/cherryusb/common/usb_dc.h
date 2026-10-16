@@ -25,6 +25,14 @@ int usb_dc_init(uint8_t busid);
 int usb_dc_deinit(uint8_t busid);
 
 /**
+ * @brief WICAN 2026-10-17: drop off the bus (D+ pull-up off) with the
+ *        controller still clocked, for an esp_restart shutdown handler.
+ *        See port/dwc2/usb_dc_dwc2.c and cherryusb/PROVENANCE.md.
+ * @return On success will return 0, and others indicate fail.
+ */
+int usb_dc_soft_disconnect(uint8_t busid);
+
+/**
  * @brief Set USB device address
  *
  * @param[in] addr Device address

@@ -477,6 +477,19 @@ void rndis_bulk_out(uint8_t busid, uint8_t ep, uint32_t nbytes)
     (void)busid;
     (void)ep;
 
+    /* WICAN 2026-10-17 (the ESPNetLink bench of 2026-10-16, coredump-verified
+     * there): an OUT completion can reach this handler before anyone armed a
+     * read, and the pointer is NULL then. A warm reboot with the host's RNDIS
+     * link up left the controller with a transfer in flight; the next image
+     * took its completion in ISR context ~5 s after boot (LoadProhibited at
+     * 0). This port owns no receive buffer (CONFIG_USBDEV_RNDIS_USING_LWIP is
+     * off: usb_net_device arms the read with its own buffer once the host
+     * configured the device), so the completion is dropped; the bridge's
+     * read follows. */
+    if (g_rndis_rx_data_buffer == NULL) {
+        return;
+    }
+
     hdr = (rndis_data_packet_t *)g_rndis_rx_data_buffer;
     if ((hdr->MessageType != REMOTE_NDIS_PACKET_MSG) || (nbytes < hdr->MessageLength)) {
         usbd_rndis_start_read((uint8_t *)g_rndis_rx_data_buffer, g_rndis_rx_total_length);

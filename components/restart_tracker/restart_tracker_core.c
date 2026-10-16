@@ -37,11 +37,17 @@
  * CPU_LOCKUP 15). Kept as plain numbers so this file stays host-buildable.
  * Until 2026-10-03 the table carried IDF 4's numbers (DEEPSLEEP 5, BROWNOUT
  * 6, the watchdogs 7..9): an interrupt-watchdog reset was recorded as a
- * deep-sleep wake and not counted as unexpected (bench, phase 5). */
+ * deep-sleep wake and not counted as unexpected (bench, phase 5). Until
+ * 2026-10-17 a USB-Serial-JTAG reset (esptool's hard reset after a flash
+ * over the native USB port) and a JTAG reset counted as unexpected: both
+ * are deliberate, like the EN pin (found on the ESPNetLink production
+ * station, 2026-10-16). */
 #define RT_RST_POWERON   1U
 #define RT_RST_EXT       2U
 #define RT_RST_SW        3U
 #define RT_RST_DEEPSLEEP 8U
+#define RT_RST_USB       11U
+#define RT_RST_JTAG      12U
 
 /* CRC-32 (IEEE 802.3, poly 0xEDB88320), same convention as the settings
  * codec; local so the core has zero deps. Shared with the crash note
@@ -97,6 +103,9 @@ bool rt_reset_reason_is_unexpected(uint32_t reason)
         case RT_RST_EXT: /* EN-pin reset: flasher/reset button = deliberate */
         case RT_RST_SW:
         case RT_RST_DEEPSLEEP:
+        case RT_RST_USB:  /* USB-Serial-JTAG reset: esptool's hard reset after
+                             a flash over the native USB port */
+        case RT_RST_JTAG: /* a debugger: deliberate like the EN pin */
             return false;
         default:
             return true; /* panic, watchdogs, brownout, unknown */

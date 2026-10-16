@@ -613,6 +613,21 @@ int usb_dc_init(uint8_t busid)
     return ret;
 }
 
+/* WICAN 2026-10-17 (ported from the ESPNetLink bench of 2026-10-16): drop
+ * off the bus (D+ pull-up off) without the deinit. The registers stay
+ * clocked, so a task still touching the stack during the ~1 s before a
+ * software reset cannot hang on a gated bus (usb_dc_deinit frees the PHY
+ * and gates the clock: tried there, it hung the chip until a power cycle).
+ * The host sees an unplug, and the next image enumerates with no transfer
+ * in flight. Called from usb_host_manager's esp_restart shutdown handler
+ * in the device role. The bit survives a soft reset: a restart meant to
+ * land in ROM download mode must skip it (WiCAN has no such path). */
+int usb_dc_soft_disconnect(uint8_t busid)
+{
+    USB_OTG_DEV->DCTL |= USB_OTG_DCTL_SDIS;
+    return 0;
+}
+
 int usb_dc_deinit(uint8_t busid)
 {
     USB_OTG_GLB->GAHBCFG |= USB_OTG_GAHBCFG_GINT;

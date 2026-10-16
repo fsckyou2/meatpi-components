@@ -165,3 +165,27 @@ usbh_*_run/stop/eth_input symbols would bypass our netif glue.
   the class stop, the memset and the hub's mutex delete. rtl8152 shares the
   template but is compiled out. Candidate for upstreaming. Proof: the
   repair hammer of the garage bench (TESTING.md).
+
+- `class/wireless/usbd_rndis.c` (2026-10-17, WICAN FIX, from the ESPNetLink
+  bench of 2026-10-16, diverges from upstream): `rndis_bulk_out` returns when
+  `g_rndis_rx_data_buffer` is NULL instead of reading the packet header
+  through it. A warm reboot with the host's RNDIS link up leaves a transfer
+  in flight; the next image took its OUT completion in ISR context about 5 s
+  after boot, before the bridge had armed a read (LoadProhibited at 0,
+  coredump-verified on the dongle). This port has no class-owned receive
+  buffer (`CONFIG_USBDEV_RNDIS_USING_LWIP` is off; `usb_net_device` arms the
+  read once configured), so the completion is dropped rather than re-armed
+  as on the dongle. Candidate for upstreaming in the LWIP form.
+
+- `port/dwc2/usb_dc_dwc2.c` + `common/usb_dc.h` (2026-10-17, WICAN
+  ADDITION, same origin): `usb_dc_soft_disconnect(busid)` sets DCTL.SDIS
+  (D+ pull-up off) and nothing else: the registers stay clocked.
+  `usb_host_manager` calls it from an `esp_restart` shutdown handler in the
+  device role, so a warm reboot looks like an unplug to the PC and the next
+  image enumerates with no transfer in flight. `usb_dc_deinit()` was
+  deliberately not used there: it frees the PHY and gates the controller
+  clock while other tasks may still touch the stack in the restart window
+  (a register access on a gated bus hung the dongle until a power cycle).
+  The bit survives a soft reset: a restart into ROM download mode must not
+  call it (no such path on WiCAN). Proof: `tools/testbench/usb/
+  usb_detach_bench.py` (`.\test.ps1 usbdetach`).
