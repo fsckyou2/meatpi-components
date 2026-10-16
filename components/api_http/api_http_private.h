@@ -62,6 +62,15 @@ esp_err_t api_util_settings_path(const char *uri, char *name,
  *  (returned as int to keep this unit esp_log-free). */
 esp_err_t api_util_level_from_str(const char *s, int *out_level);
 
+/**
+ * The ENABLED bridge (bridge_manager "bridges" array) whose side a or b
+ * is @p jack (a server, channel or fixed jack name): its name, borrowed
+ * from @p bridges, or NULL when nothing uses the jack. A server or
+ * channel with no bridge accepts clients and discards their bytes, so
+ * /api/sockets and /api/ws report this as "bridge" (2026-10-16).
+ */
+const char *api_util_bridge_for(const cJSON *bridges, const char *jack);
+
 /* ---- HTTP helpers (api_http.c): httpd_req_t kept as void* here so the
  * pure unit above compiles without esp_http_server ------------------------- */
 

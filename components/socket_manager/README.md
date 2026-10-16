@@ -105,4 +105,19 @@ glue/main wraps servers as endpoints.
 `GET /api/sockets` (2026-07-05, served by the `api_http` glue: this component
 stays transport-free): configured entries from this component's settings
 + live counters from `socket_manager_stats()`; `up:false` = configured but not
-running.
+running. `bridge` (2026-10-16, the glue cross-references bridge_manager's
+settings): the enabled bridge that uses the server, or `null`.
+
+## A server nobody bridged (2026-10-16)
+
+A server with no subscriber accepts clients and discards their bytes
+(`deliver()`: "nobody attached yet, by design"). A field report read that
+as "slcan over TCP connects but never receives": `slcan0` switched on under
+Socket servers, no `can <-slcan-> slcan0` connection row, nothing in the
+log to say why. The net task now logs, right after `client connected`
+(and on a UDP server's first datagram of the boot),
+`W <name>: no connection uses this server, its data goes nowhere
+(Settings, Connections)`: once per connect, so a client in a reconnect
+loop prints it at the loop's cadence like the INFO line. The gate
+`.\test.ps1 slcan` provokes it on purpose (its first leg) and then proves
+the bridged path.

@@ -222,6 +222,18 @@ static void handle_tcp_accept(sm_server_t *srv, const smp_server_cfg_t *cfg)
             srv->stats.clients++;
             ESP_LOGI(TAG, "%s: client connected (%d total)", cfg->name,
                      client_count(srv));
+
+            if (srv->sub == NULL)
+            {
+                /* a server nobody bridged accepts clients and discards
+                   their bytes (deliver): a field report read that as
+                   "slcan connects but never receives" (2026-10-16) with
+                   nothing in the log to say why. Say it where the user
+                   looks; once per connect, like the line above. */
+                ESP_LOGW(TAG, "%s: no connection uses this server, its "
+                         "data goes nowhere (Settings, Connections)",
+                         cfg->name);
+            }
             return;
         }
     }
@@ -247,7 +259,7 @@ static void handle_tcp_rx(sm_server_t *srv, const smp_server_cfg_t *cfg,
     deliver(srv, buf, n);
 }
 
-static void handle_udp_rx(sm_server_t *srv)
+static void handle_udp_rx(sm_server_t *srv, const smp_server_cfg_t *cfg)
 {
     uint8_t buf[SOCKET_MANAGER_CHUNK_SIZE];
     struct sockaddr_in from;
@@ -258,6 +270,14 @@ static void handle_udp_rx(sm_server_t *srv)
     if (n <= 0)
     {
         return;
+    }
+
+    if (!srv->has_peer && srv->sub == NULL)
+    {
+        /* the first datagram of the boot on a server nobody bridged:
+           the same hint as the TCP accept path, once */
+        ESP_LOGW(TAG, "%s: no connection uses this server, its data goes "
+                 "nowhere (Settings, Connections)", cfg->name);
     }
 
     srv->last_peer = from; /* UDP "connection": TX targets the last peer */
@@ -358,7 +378,7 @@ static void net_task(void *arg)
             {
                 if (cfg->is_udp)
                 {
-                    handle_udp_rx(srv);
+                    handle_udp_rx(srv, cfg);
                 }
                 else
                 {

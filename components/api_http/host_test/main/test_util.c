@@ -223,6 +223,35 @@ static void test_level_mapping(void)
     TEST_ASSERT_NOT_EQUAL(ESP_OK, api_util_level_from_str(NULL, &lvl));
 }
 
+/* ---- bridge lookup for the data-path routes --------------------------------------- */
+
+static void test_bridge_for_jack(void)
+{
+    /* the factory bridges plus a parked one and one with no "enabled" */
+    cJSON *bridges = cJSON_Parse(
+        "[{\"name\":\"br_obd\",\"a\":\"obd\",\"b\":\"ws_obd\","
+        "\"translator\":\"raw\",\"enabled\":true},"
+        "{\"name\":\"br_tcp_obd\",\"a\":\"obd0\",\"b\":\"obd\","
+        "\"translator\":\"raw\",\"enabled\":true},"
+        "{\"name\":\"br_echo\",\"a\":\"ws_can\",\"b\":\"obd0\","
+        "\"translator\":\"raw\",\"enabled\":false},"
+        "{\"name\":\"br_old\",\"a\":\"gvret0\",\"b\":\"can\"}]");
+
+    /* either side matches; the first enabled bridge wins for a shared jack */
+    TEST_ASSERT_EQUAL_STRING("br_tcp_obd", api_util_bridge_for(bridges, "obd0"));
+    TEST_ASSERT_EQUAL_STRING("br_obd", api_util_bridge_for(bridges, "obd"));
+    TEST_ASSERT_EQUAL_STRING("br_obd", api_util_bridge_for(bridges, "ws_obd"));
+    /* a parked bridge does not count: the channel is unused */
+    TEST_ASSERT_NULL(api_util_bridge_for(bridges, "ws_can"));
+    /* no "enabled" at all = disabled (bm_parse_bridge's default) */
+    TEST_ASSERT_NULL(api_util_bridge_for(bridges, "gvret0"));
+    /* the trap itself: a server nothing uses */
+    TEST_ASSERT_NULL(api_util_bridge_for(bridges, "slcan0"));
+    TEST_ASSERT_NULL(api_util_bridge_for(bridges, NULL));
+    TEST_ASSERT_NULL(api_util_bridge_for(NULL, "obd0"));
+    cJSON_Delete(bridges);
+}
+
 void run_util_tests(void)
 {
     RUN_TEST(test_redact_passwords);
@@ -236,4 +265,5 @@ void run_util_tests(void)
     RUN_TEST(test_path_schema);
     RUN_TEST(test_path_rejects_bad);
     RUN_TEST(test_level_mapping);
+    RUN_TEST(test_bridge_for_jack);
 }

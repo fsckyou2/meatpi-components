@@ -25,5 +25,8 @@ bridge_manager.bridges += {name:"br_slcan", a:"can", b:"slcan0", translator:"slc
 ## Tests
 - Host: `./test.ps1 host translator_slcan`, encode/decode round-trips
   (11/29/RTR/dlc), byte-fragmentation, multi-frame, malformed, control absorb.
-- Bench: `tools/testbench/slcan_bridge_test.py` (python-can + PCAN, both
-  directions) → **SLCAN BRIDGE PASS**. Throughput: `slcan_perf_test.py`.
+- Bench: `.\test.ps1 slcan` (= `tools/testbench/can/slcan_bridge_test.py`,
+  python-can + PCAN both directions, the /ws/can monitor beside the TCP
+  client, the Linux clients on rpi001, and first the trap: a server with
+  no connection row) → **SLCAN BRIDGE PASS**. Throughput:
+  `slcan_perf_test.py`.

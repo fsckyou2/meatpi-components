@@ -109,4 +109,6 @@ maxItems went 4→6 in the same change (`WEBSOCKET_MANAGER_MAX_CHANNELS`,
 `GET /api/ws` (2026-07-05, served by the `api_http` glue: this component
 stays transport-free): configured entries from this component's settings
 + live counters from `websocket_manager_stats()`; `up:false` = configured but not
-running.
+running. `bridge` (2026-10-16): the enabled bridge on the channel, or
+`null` (information, not a fault: `ws_log` is fed by the log sinks, not a
+bridge).

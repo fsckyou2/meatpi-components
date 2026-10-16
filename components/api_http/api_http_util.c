@@ -232,3 +232,35 @@ esp_err_t api_util_level_from_str(const char *s, int *out_level)
 
     return ESP_ERR_NOT_FOUND;
 }
+
+const char *api_util_bridge_for(const cJSON *bridges, const char *jack)
+{
+    const cJSON *b = NULL;
+
+    if (bridges == NULL || jack == NULL)
+    {
+        return NULL;
+    }
+
+    cJSON_ArrayForEach(b, bridges)
+    {
+        const cJSON *name = cJSON_GetObjectItemCaseSensitive(b, "name");
+        const cJSON *a = cJSON_GetObjectItemCaseSensitive(b, "a");
+        const cJSON *bb = cJSON_GetObjectItemCaseSensitive(b, "b");
+
+        /* a bridge with no "enabled" is disabled (bm_parse_bridge) */
+        if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(b, "enabled")) ||
+            !cJSON_IsString(name))
+        {
+            continue;
+        }
+
+        if ((cJSON_IsString(a) && strcmp(a->valuestring, jack) == 0) ||
+            (cJSON_IsString(bb) && strcmp(bb->valuestring, jack) == 0))
+        {
+            return name->valuestring;
+        }
+    }
+
+    return NULL;
+}

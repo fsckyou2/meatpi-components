@@ -89,6 +89,25 @@ static cJSON *copy_keys(const cJSON *entry, const char *const *keys,
     return out;
 }
 
+/* "bridge": the enabled bridge that uses this server/channel, or null.
+   A jack nothing uses accepts clients and discards their bytes: the
+   field names the gap a user otherwise reads as "connects, no data"
+   (2026-10-16). @p bridges is the bridge_manager settings array. */
+static void add_bridge(cJSON *item, const cJSON *bridges, const char *name)
+{
+    const char *br = (name != NULL) ? api_util_bridge_for(bridges, name)
+                                    : NULL;
+
+    if (br != NULL)
+    {
+        cJSON_AddStringToObject(item, "bridge", br);
+    }
+    else
+    {
+        cJSON_AddNullToObject(item, "bridge");
+    }
+}
+
 static esp_err_t bridges_handler(httpd_req_t *req)
 {
     static const char *const KEYS[] =
@@ -140,7 +159,9 @@ static esp_err_t sockets_handler(httpd_req_t *req)
     static const char *const KEYS[] =
         { "name", "proto", "port", "enabled" };
     const cJSON *cfg = NULL;
+    const cJSON *bridges = NULL;
     cJSON *root = settings_array("socket_manager", "servers", &cfg);
+    cJSON *broot = settings_array("bridge_manager", "bridges", &bridges);
     cJSON *resp = cJSON_CreateObject();
     cJSON *arr  = cJSON_AddArrayToObject(resp, "servers");
     const cJSON *entry = NULL;
@@ -175,9 +196,11 @@ static esp_err_t sockets_handler(httpd_req_t *req)
             cJSON_AddBoolToObject(item, "up", false);
         }
 
+        add_bridge(item, bridges, name);
         cJSON_AddItemToArray(arr, item);
     }
 
+    cJSON_Delete(broot);
     cJSON_Delete(root);
     return api_send_json(req, resp);
 }
@@ -187,7 +210,9 @@ static esp_err_t ws_handler(httpd_req_t *req)
     static const char *const KEYS[] =
         { "name", "path", "mode", "max_clients", "enabled" };
     const cJSON *cfg = NULL;
+    const cJSON *bridges = NULL;
     cJSON *root = settings_array("websocket_manager", "channels", &cfg);
+    cJSON *broot = settings_array("bridge_manager", "bridges", &bridges);
     cJSON *resp = cJSON_CreateObject();
     cJSON *arr  = cJSON_AddArrayToObject(resp, "channels");
     const cJSON *entry = NULL;
@@ -223,9 +248,11 @@ static esp_err_t ws_handler(httpd_req_t *req)
             cJSON_AddBoolToObject(item, "up", false);
         }
 
+        add_bridge(item, bridges, name);
         cJSON_AddItemToArray(arr, item);
     }
 
+    cJSON_Delete(broot);
     cJSON_Delete(root);
     return api_send_json(req, resp);
 }
