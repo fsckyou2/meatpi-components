@@ -59,6 +59,44 @@ static uint32_t link_now_ms(void)
 
 /* ---- the transmit gate ------------------------------------------------------ */
 
+/** Once per listen-only episode: why a transmit was refused. A tester on a
+ *  gatewayed OBD port with `auto` read the silent refusal as "connected,
+ *  no comm to the CAN bus" (2026-10-17); the line names the way out. */
+static void link_say_refused(can_core_handle_t *handle)
+{
+    if (handle->tx_refused_said || handle->config.quiet_link)
+    {
+        return;
+    }
+
+    handle->tx_refused_said = true;
+
+    const can_ab_t *ab = &handle->ab;
+    const char *why;
+
+    if (ab->state == CAN_AB_MISMATCH)
+    {
+        why = "the bus runs at a bitrate this node cannot read";
+    }
+    else if (ab->cfg.n_candidates > 1)
+    {
+        why = "no bitrate proven on a silent bus (auto): set the bit rate, "
+              "or let the tester state it on connect";
+    }
+    else if (ab->cfg.want_normal)
+    {
+        why = "still listening before it talks";
+    }
+    else
+    {
+        why = "listen-only by the settings";
+    }
+
+    ESP_LOGW(TAG, "transmit refused: the node may not talk, %s (%s at %lu "
+                  "kbit/s)", why, can_ab_state_name(ab),
+             (unsigned long)can_ab_baud(ab));
+}
+
 bool can_link_tx_enter(can_core_handle_t *handle, uint32_t timeout_ms)
 {
     uint32_t waited = 0;
@@ -85,6 +123,7 @@ bool can_link_tx_enter(can_core_handle_t *handle, uint32_t timeout_ms)
         if (waited >= timeout_ms)
         {
             handle->stats.tx_refused++;
+            link_say_refused(handle);
             return false;
         }
 
@@ -126,6 +165,7 @@ static void link_tx_open(can_core_handle_t *handle)
     taskENTER_CRITICAL(&s_tx_mux);
     handle->tx_open = true;
     taskEXIT_CRITICAL(&s_tx_mux);
+    handle->tx_refused_said = false; /* a new episode gets its own line */
 }
 
 /* ---- applying what the policy decides -------------------------------------- */
@@ -284,7 +324,8 @@ static void link_log(const can_core_handle_t *handle)
         ESP_LOGI(TAG, "link up: %lu kbit/s, %s (%s)", baud,
                  ab->normal ? "normal" : "listen-only",
                  ab->verified ? "bitrate proven by frames"
-                              : "silent bus, bitrate as configured");
+                 : ab->adopted ? "silent bus, bitrate stated by the tester"
+                               : "silent bus, bitrate as configured");
         break;
 
     case CAN_AB_MISMATCH:
@@ -364,11 +405,60 @@ void can_core_get_link(can_core_handle_t *handle, can_core_link_t *out)
     out->autobaud = ab->cfg.n_candidates > 1;
     out->listen_only = !ab->normal;
     out->verified = ab->verified;
+    out->adopted = ab->adopted;
     out->switches = ab->switches;
     out->demotions = ab->demotions;
 }
 
 /* ---- runtime reconfiguration (another task: the RX task is parked) ----------- */
+
+elm327_err_t can_core_adopt_baud(can_core_handle_t *handle,
+                                 uint32_t baud_kbps, bool *adopted)
+{
+    if (adopted != NULL)
+    {
+        *adopted = false;
+    }
+
+    if (!handle || !handle->initialised)
+    {
+        return ELM327_ERR_NOT_INIT;
+    }
+
+    if (baud_kbps == 0 || baud_kbps > 0xFFFFu)
+    {
+        return ELM327_OK; /* not a bitrate: the policy would refuse it too */
+    }
+
+    handle->reconfiguring = true;
+    can_core_rx_wait_parked(handle);
+
+    bool taken = false;
+    can_ab_action_t a = can_ab_adopt(&handle->ab, (uint16_t)baud_kbps,
+                                     link_now_ms(), handle->link_frames,
+                                     link_bad(handle), &taken);
+    elm327_err_t err = ELM327_OK;
+
+    if (a.apply)
+    {
+        err = link_apply(handle, a.baud_kbps, a.listen_only);
+        link_mark(handle);
+    }
+
+    if (taken)
+    {
+        link_log(handle);
+    }
+
+    handle->reconfiguring = false;
+
+    if (adopted != NULL)
+    {
+        *adopted = taken && (err == ELM327_OK);
+    }
+
+    return err;
+}
 
 elm327_err_t can_core_set_silent_mode(can_core_handle_t *handle,
                                         bool silent_mode)
@@ -464,6 +554,19 @@ elm327_err_t can_core_set_baud(can_core_handle_t *handle,
 
     handle->config.baud_kbps = baud_kbps;
     return ELM327_OK;
+}
+
+elm327_err_t can_core_adopt_baud(can_core_handle_t *handle,
+                                 uint32_t baud_kbps, bool *adopted)
+{
+    (void)baud_kbps;
+
+    if (adopted != NULL)
+    {
+        *adopted = false;
+    }
+
+    return (handle && handle->initialised) ? ELM327_OK : ELM327_ERR_NOT_INIT;
 }
 
 #endif /* ESP_PLATFORM */

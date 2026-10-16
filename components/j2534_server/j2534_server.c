@@ -153,6 +153,11 @@ void j2534_srv_count_tx(void)
     s_status.frames_tx++;
 }
 
+void j2534_srv_count_tx_refused(void)
+{
+    s_status.tx_refused++;
+}
+
 static uint32_t rd_u32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -218,26 +223,13 @@ static void handle_connect(const j2534_transport_t *t, const j2534_hdr_t *h,
         return;
     }
 
-    /* the bus has its bitrate (the device's setting, or what the node read
-       off the wire): a tester that asks for another one is told so, not
-       served at the wrong rate */
-    can_manager_status_t cst;
-    uint32_t bus_kbps = 0;
+    /* the bus has its bitrate, or takes the tester's on a silent bus
+       (j2534_channel.c): a tester asking for another one is told so */
+    uint32_t bst = j2534_channel_bus_baud(proto, baud);
 
-    if (can_manager_status(&cst) == ESP_OK && cst.running)
+    if (bst != J2534_STATUS_NOERROR)
     {
-        bus_kbps = cst.link.verified ? cst.link.detected_kbps
-                 : cst.baud_auto     ? 0
-                                     : cst.baud_kbps;
-    }
-
-    if ((proto == J2534_PROT_CAN || proto == J2534_PROT_ISO15765) &&
-        j2534_connect_baud_check(baud, bus_kbps) != J2534_STATUS_NOERROR)
-    {
-        ESP_LOGW(TAG, "CONNECT at %lu bit/s refused: the CAN bus runs at "
-                      "%lu kbit/s", (unsigned long)baud,
-                 (unsigned long)bus_kbps);
-        j2534_srv_send_ack(t, h->seq, 0, J2534_ERR_INVALID_BAUDRATE, NULL);
+        j2534_srv_send_ack(t, h->seq, 0, bst, NULL);
         return;
     }
 

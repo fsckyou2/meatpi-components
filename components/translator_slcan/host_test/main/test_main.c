@@ -13,6 +13,8 @@
 #include "bridge_manager.h"
 #include "can_frame_wire.h"
 
+#include "translator_slcan_private.h"
+
 extern const bridge_translator_t translator_slcan_desc;
 
 /* ---- sink collectors --------------------------------------------------- */
@@ -151,6 +153,39 @@ void test_encode_absorbs_control(void)
     TEST_ASSERT_EQUAL_HEX32(0x100, g_frames[0].id);
 }
 
+static uint16_t g_stated;
+
+static void stated_hook(uint16_t kbps)
+{
+    g_stated = kbps;
+}
+
+void test_encode_s_command_states_the_bitrate(void)
+{
+    /* the one impure edge (2026-10-17): S<n> reaches the hook as kbit/s,
+       still produces no frame, and nothing else does */
+    reset();
+    g_stated = 0;
+    slcan_bitrate_hook = stated_hook;
+    enc("S6\rO\r");
+    TEST_ASSERT_EQUAL_UINT16(500, g_stated);
+    enc("S5\r");
+    TEST_ASSERT_EQUAL_UINT16(250, g_stated);
+    g_stated = 0;
+    enc("Sx\r");                 /* a code the codec does not know */
+    enc("S61\r");                /* not an S line                  */
+    enc("t1001AA\r");
+    TEST_ASSERT_EQUAL_UINT16(0, g_stated);
+    TEST_ASSERT_EQUAL(1, g_nframes);
+    slcan_bitrate_hook = NULL;
+    enc("S6\r");                 /* no hook: absorbed as before    */
+    TEST_ASSERT_EQUAL_UINT16(0, g_stated);
+    TEST_ASSERT_EQUAL_UINT16(1000, slcan_bitrate_kbps('8'));
+    TEST_ASSERT_EQUAL_UINT16(83, slcan_bitrate_kbps('9'));
+    TEST_ASSERT_EQUAL_UINT16(10, slcan_bitrate_kbps('0'));
+    TEST_ASSERT_EQUAL_UINT16(0, slcan_bitrate_kbps('A'));
+}
+
 void test_encode_rejects_malformed(void)
 {
     reset();
@@ -250,6 +285,7 @@ void app_main(void)
     RUN_TEST(test_encode_multiframe_one_chunk);
     RUN_TEST(test_encode_fragmented_every_byte);
     RUN_TEST(test_encode_absorbs_control);
+    RUN_TEST(test_encode_s_command_states_the_bitrate);
     RUN_TEST(test_encode_rejects_malformed);
     RUN_TEST(test_encode_overlong_line_no_corruption);
     RUN_TEST(test_decode_std_data);

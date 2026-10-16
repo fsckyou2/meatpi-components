@@ -42,6 +42,7 @@
 #include "can_core.h"
 
 #include "j2534_server.h"   /* J2534_MAX_CHANNELS */
+#include "j2534_server_private.h"
 
 static const char *TAG = "j2534_server";
 
@@ -140,10 +141,90 @@ typedef struct {
 static channel_t s_ch[J2534_MAX_CHANNELS];
 static SemaphoreHandle_t s_lock;
 static StaticSemaphore_t s_lock_buf;
+static bool s_refused_said;    /* the refusal line went out this connect */
 
 /* ---- helpers ---------------------------------------------------------- */
 
 static uint32_t now_us(void) { return (uint32_t)esp_timer_get_time(); }
+
+/* A write the CAN node refused: it may not talk yet (listening for the
+   bitrate on a silent bus with `auto`, a mismatch, listen-only). Counted
+   on /api/j2534, said once per CONNECT (can_core says why, once per
+   episode). 2026-10-17: a tester read the silent refusal as "no comm". */
+static void say_refused(const char *what)
+{
+    j2534_srv_count_tx_refused();
+
+    if (s_refused_said)
+    {
+        return;
+    }
+
+    s_refused_said = true;
+    ESP_LOGW(TAG, "%s write refused: the CAN node may not talk yet (see "
+             "the can_core line: no bitrate proven, a mismatch, or "
+             "listen-only); set the bit rate, or CONNECT with the bus's",
+             what);
+}
+
+uint32_t j2534_channel_bus_baud(uint32_t proto, uint32_t baud_bps)
+{
+    if (proto != J2534_PROT_CAN && proto != J2534_PROT_ISO15765)
+    {
+        return J2534_STATUS_NOERROR; /* not a CAN protocol: nothing to check */
+    }
+
+    /* the bus has its bitrate (the device's setting, what the node read
+       off the wire, or what a tester stated and it runs at): a tester that
+       asks for another one is told so, not served at the wrong rate */
+    can_manager_status_t cst;
+    uint32_t bus_kbps = 0;
+
+    if (can_manager_status(&cst) == ESP_OK && cst.running)
+    {
+        bus_kbps = (cst.link.verified || cst.link.adopted)
+                       ? cst.link.baud_kbps
+                   : cst.baud_auto ? 0
+                                   : cst.baud_kbps;
+    }
+
+    if (j2534_connect_baud_check(baud_bps, bus_kbps) != J2534_STATUS_NOERROR)
+    {
+        ESP_LOGW(TAG, "CONNECT at %lu bit/s refused: the CAN bus runs at "
+                      "%lu kbit/s", (unsigned long)baud_bps,
+                 (unsigned long)bus_kbps);
+        return J2534_ERR_INVALID_BAUDRATE;
+    }
+
+    /* auto with nothing proven: the tester's baud is the best word there
+       is on a silent bus (2026-10-17: a tester on a gatewayed OBD port,
+       which speaks only when asked, read the refused writes as "connected,
+       no comm to the CAN bus"). Not taken (the bus not silent, unreadable
+       traffic seen, a rate this node does not know): the channel still
+       opens and its writes are refused, with a W line per CONNECT. */
+    if (bus_kbps == 0 && baud_bps >= 1000u)
+    {
+        esp_err_t ad = can_manager_adopt_baud(baud_bps / 1000u);
+
+        if (ad == ESP_OK)
+        {
+            ESP_LOGI(TAG, "CONNECT at %lu bit/s: the bus was silent, the "
+                          "node now runs at the tester's bitrate",
+                     (unsigned long)baud_bps);
+        }
+        else if (ad == ESP_ERR_NOT_SUPPORTED)
+        {
+            ESP_LOGW(TAG, "CONNECT at %lu bit/s: no bitrate proven on the "
+                          "bus and the tester's was not taken (the bus not "
+                          "silent, unreadable traffic seen, or not a rate "
+                          "this node knows): writes are refused until the "
+                          "bus talks; set the bit rate",
+                     (unsigned long)baud_bps);
+        }
+    }
+
+    return J2534_STATUS_NOERROR;
+}
 
 static void put_id_be(uint8_t *p, uint32_t id)
 {
@@ -256,6 +337,7 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
     xSemaphoreTake(s_lock, portMAX_DELAY);
     channel_t *c = &s_ch[slot];
     teardown(c);
+    s_refused_said = false;
     c->in_use = true;
     c->protocol = protocol;
     c->flags = flags;
@@ -350,10 +432,17 @@ uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg)
             uint32_t id = get_id_be(msg->data);
             bool ext = (msg->tx_flags & J2534_TX_CAN_29BIT_ID) != 0;
             uint8_t dlc = (uint8_t)(msg->data_size - 4);
-            if (can_manager_send(id, ext, false, msg->data + 4, dlc)
-                != ESP_OK)
+            esp_err_t err = can_manager_send(id, ext, false, msg->data + 4,
+                                             dlc);
+
+            if (err != ESP_OK)
             {
                 st = J2534_ERR_FAILED;
+
+                if (err == ESP_ERR_INVALID_STATE)
+                {
+                    say_refused("CAN");
+                }
             }
         }
     }
@@ -366,6 +455,11 @@ uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg)
         else if (msg->data_size == 0)
         {
             st = J2534_ERR_INVALID_MSG;
+        }
+        else if (!can_manager_tx_ready())
+        {
+            say_refused("ISO15765");
+            st = J2534_ERR_FAILED;
         }
         else
         {

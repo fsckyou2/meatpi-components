@@ -128,6 +128,7 @@ typedef struct
     bool     normal;        /**< The node may transmit right now.               */
     bool     verified;      /**< Frames were read at the bitrate in use.        */
     bool     bitten;        /**< A mismatch was seen: silence promotes no more. */
+    bool     adopted;       /**< Running at a bitrate a tester stated.          */
     uint8_t  misses;        /**< Auto: candidates that failed in this round.    */
     uint16_t detected_kbps; /**< Last bitrate proven by frames, 0 = none.       */
     uint32_t enter_ms;      /**< When the bitrate / mode in use was entered.    */
@@ -169,6 +170,22 @@ can_ab_action_t can_ab_step(can_ab_t *ab, uint32_t now_ms, uint32_t frames,
 can_ab_action_t can_ab_want_normal(can_ab_t *ab, bool want_normal,
                                    uint32_t now_ms, uint32_t frames,
                                    uint32_t bad);
+
+/**
+ * @brief A tester states the bus bitrate (a J2534 CONNECT, slcan's S
+ *        command). Taken only when the policy has no verdict of its own:
+ *        auto with nothing proven, the bus silent (no frame and no error
+ *        for CAN_AB_SILENT_MS at the candidate in use) and never bitten.
+ *        The node then runs at that bitrate in the configured mode,
+ *        unverified, like a fixed bitrate on a silent bus; the watchdog
+ *        demotes it on the first unreadable traffic and the walk goes on.
+ *        A fixed bitrate is the settings' word and is not overruled.
+ * @param kbps       Must be one of the candidates.
+ * @param[out] taken True when the statement was taken (may be NULL).
+ * @return What to do to the node; after applying it call can_ab_mark().
+ */
+can_ab_action_t can_ab_adopt(can_ab_t *ab, uint16_t kbps, uint32_t now_ms,
+                             uint32_t frames, uint32_t bad, bool *taken);
 
 /** The node was reconfigured: evidence is counted from here. */
 void can_ab_mark(can_ab_t *ab, uint32_t now_ms, uint32_t frames,

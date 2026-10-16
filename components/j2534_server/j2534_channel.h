@@ -58,6 +58,18 @@ void j2534_channel_reset_all(void);     /* tester disconnected: tear down */
 void j2534_channel_set_allow_reflash(bool allow);
 
 /**
+ * The bus bitrate at CONNECT. The bus runs at the device's setting, at
+ * what the listen-before-talk policy read off the wire, or at a bitrate a
+ * tester stated; a CAN/ISO15765 CONNECT at another @p baud_bps is answered
+ * ERR_INVALID_BAUDRATE. With `can_manager.baud = auto` and nothing proven
+ * yet the tester's rate is stated to the node (can_manager_adopt_baud,
+ * 2026-10-17): taken when the bus has been silent, otherwise the channel
+ * still opens and its writes are refused with a log line. Returns a J2534
+ * status code (NOERROR = go on and open the channel).
+ */
+uint32_t j2534_channel_bus_baud(uint32_t proto, uint32_t baud_bps);
+
+/**
  * Bind a channel slot to a protocol. For ISO15765, @p tx_id/@p rx_id set
  * the ISO-TP addressing (0 = defer to a FLOW_CONTROL filter). Returns a
  * J2534 status code.

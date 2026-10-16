@@ -59,6 +59,8 @@ typedef struct {
     uint8_t  channel_count;      /* active PassThruConnect channels      */
     uint32_t frames_rx;          /* wire frames received                 */
     uint32_t frames_tx;          /* wire frames sent                     */
+    uint32_t tx_refused;         /* writes the CAN node refused: it may  */
+                                 /* not talk yet (listening, mismatch)   */
     bool     allow_reflash;      /* ECU-flashing gate open (unsafe)      */
     bool     allow_lan;          /* reachable on STA/USB-eth uplinks     */
     bool     exclusive;          /* runtime: autopid off the bus while a  */

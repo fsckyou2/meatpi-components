@@ -83,6 +83,7 @@ static void next_candidate(can_ab_t *ab)
     ab->idx = (uint8_t)((ab->idx + 1u) % ab->cfg.n_candidates);
     ab->switches++;
     ab->verified = false;
+    ab->adopted = false;
 }
 
 void can_ab_mark(can_ab_t *ab, uint32_t now_ms, uint32_t frames,
@@ -194,6 +195,69 @@ can_ab_action_t can_ab_want_normal(can_ab_t *ab, bool want_normal,
     return no_action(); /* no verdict yet: the policy promotes later */
 }
 
+can_ab_action_t can_ab_adopt(can_ab_t *ab, uint16_t kbps, uint32_t now_ms,
+                             uint32_t frames, uint32_t bad, bool *taken)
+{
+    if (taken != NULL)
+    {
+        *taken = false;
+    }
+
+    if (ab == NULL || ab->cfg.n_candidates < 2 ||
+        ab->state == CAN_AB_RUNNING || ab->bitten)
+    {
+        /* no policy, a fixed bitrate (the settings' word), a verdict of
+           its own, or a bus that once carried unreadable traffic */
+        return no_action();
+    }
+
+    /* the bus has to be silent at the candidate in use: the proof a fixed
+       bitrate needs before it talks (a gatewayed OBD port speaks only
+       when asked, and a tester is about to ask) */
+    if (frames - ab->frames0 != 0 || bad - ab->span_bad0 != 0 ||
+        now_ms - ab->enter_ms < CAN_AB_SILENT_MS)
+    {
+        return no_action();
+    }
+
+    uint8_t idx = ab->cfg.n_candidates;
+
+    for (uint8_t i = 0; i < ab->cfg.n_candidates; i++)
+    {
+        if (ab->cfg.candidates[i] == kbps)
+        {
+            idx = i;
+        }
+    }
+
+    if (idx == ab->cfg.n_candidates)
+    {
+        return no_action(); /* not a bitrate this node knows */
+    }
+
+    if (idx != ab->idx)
+    {
+        ab->idx = idx;
+        ab->switches++;
+    }
+
+    ab->state = CAN_AB_RUNNING;
+    ab->verified = false;
+    ab->adopted = true;
+    ab->misses = 0;
+    ab->normal = ab->cfg.want_normal;
+    can_ab_mark(ab, now_ms, frames, bad);
+
+    if (taken != NULL)
+    {
+        *taken = true;
+    }
+
+    /* the configured mode at the stated bitrate (a bounce even when the
+       candidate stays: the mode changes) */
+    return apply_action(ab, !ab->cfg.want_normal);
+}
+
 /** Frames were read at the bitrate in use: the configured mode applies. */
 static can_ab_action_t proven(can_ab_t *ab, uint32_t now_ms, uint32_t frames,
                               uint32_t bad)
@@ -221,6 +285,7 @@ static can_ab_action_t mismatch(can_ab_t *ab, uint32_t now_ms,
 
     ab->bitten = true;
     ab->verified = false;
+    ab->adopted = false;
     ab->normal = false;
 
     if (was_normal)

@@ -533,6 +533,130 @@ void test_ab_null_and_empty_config(void)
     TEST_ASSERT_EQUAL_UINT8(CAN_AB_MAX_CANDIDATES, ab.cfg.n_candidates);
 }
 
+void test_ab_adopts_a_stated_bitrate_on_a_silent_auto_bus(void)
+{
+    bool taken = false;
+    can_ab_action_t a;
+
+    /* auto, silent: no verdict of its own */
+    reset_clock();
+    start(AUTO_500_250, 2, true);
+    run(400, 0, 0);
+    TEST_ASSERT_EQUAL(CAN_AB_LISTENING, s_ab.state);
+
+    /* a tester states 250: the node runs there, normal, unproven */
+    a = can_ab_adopt(&s_ab, 250, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_TRUE(taken);
+    TEST_ASSERT_TRUE(a.apply);
+    TEST_ASSERT_EQUAL_UINT16(250, a.baud_kbps);
+    TEST_ASSERT_FALSE(a.listen_only);
+    can_ab_mark(&s_ab, s_now, s_frames, s_bad);
+    TEST_ASSERT_EQUAL(CAN_AB_RUNNING, s_ab.state);
+    TEST_ASSERT_TRUE(s_ab.normal);
+    TEST_ASSERT_TRUE(s_ab.adopted);
+    TEST_ASSERT_FALSE(s_ab.verified);
+    TEST_ASSERT_EQUAL_UINT16(250, can_ab_baud(&s_ab));
+    TEST_ASSERT_EQUAL_STRING("running", can_ab_state_name(&s_ab));
+
+    /* frames at the stated bitrate prove it */
+    run(50, 1, 0);
+    TEST_ASSERT_TRUE(s_ab.verified);
+    TEST_ASSERT_EQUAL_UINT16(250, s_ab.detected_kbps);
+
+    /* a second statement changes nothing once a verdict exists */
+    a = can_ab_adopt(&s_ab, 500, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_FALSE(taken);
+    TEST_ASSERT_FALSE(a.apply);
+    TEST_ASSERT_EQUAL_UINT16(250, can_ab_baud(&s_ab));
+
+    /* a wrong statement is demoted by the watchdog like any talking node,
+       and the candidate walk goes on from there */
+    reset_clock();
+    start(AUTO_500_250, 2, true);
+    run(400, 0, 0);
+    a = can_ab_adopt(&s_ab, 500, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_TRUE(taken);
+    can_ab_mark(&s_ab, s_now, s_frames, s_bad);
+    s_applies = 0;
+    run(50, 0, 10);                      /* garbage, no frame             */
+    TEST_ASSERT_FALSE(s_ab.normal);
+    TEST_ASSERT_FALSE(s_ab.adopted);
+    TEST_ASSERT_TRUE(s_ab.bitten);
+    TEST_ASSERT_TRUE(s_last.listen_only);
+    TEST_ASSERT_EQUAL_UINT16(250, s_last.baud_kbps);
+
+    /* the settings' listen-only wish is kept at the stated bitrate */
+    reset_clock();
+    start(AUTO_500_250, 2, false);
+    run(400, 0, 0);
+    a = can_ab_adopt(&s_ab, 250, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_TRUE(taken);
+    TEST_ASSERT_TRUE(a.apply);
+    TEST_ASSERT_TRUE(a.listen_only);
+    TEST_ASSERT_FALSE(s_ab.normal);
+}
+
+void test_ab_adopt_is_refused_without_a_silent_auto_bus(void)
+{
+    bool taken = true;
+    can_ab_action_t a;
+
+    /* a fixed bitrate is the settings' word */
+    reset_clock();
+    start(FIXED_500, 1, true);
+    run(400, 0, 0);
+    a = can_ab_adopt(&s_ab, 250, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_FALSE(taken);
+    TEST_ASSERT_FALSE(a.apply);
+    TEST_ASSERT_EQUAL_UINT16(500, can_ab_baud(&s_ab));
+
+    /* auto, but the node is too young to call the bus silent */
+    reset_clock();
+    start(AUTO_500_250, 2, true);
+    run(100, 0, 0);
+    a = can_ab_adopt(&s_ab, 500, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_FALSE(taken);
+    run(300, 0, 0);
+    a = can_ab_adopt(&s_ab, 500, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_TRUE(taken);             /* ... and old enough now        */
+
+    /* an error in the span is not silence; a span later it is */
+    reset_clock();
+    start(AUTO_500_250, 2, true);
+    run(400, 0, 0);
+    s_bad += 1;
+    a = can_ab_adopt(&s_ab, 500, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_FALSE(taken);
+    run(1100, 0, 0);
+    a = can_ab_adopt(&s_ab, 500, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_TRUE(taken);
+
+    /* a bitrate this node does not know */
+    reset_clock();
+    start(AUTO_500_250, 2, true);
+    run(400, 0, 0);
+    a = can_ab_adopt(&s_ab, 125, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_FALSE(taken);
+    TEST_ASSERT_EQUAL(CAN_AB_LISTENING, s_ab.state);
+
+    /* a bus that once carried unreadable traffic: only frames promote */
+    reset_clock();
+    start(AUTO_500_250, 2, true);
+    run(1000, 0, 100);                   /* every candidate fails         */
+    TEST_ASSERT_TRUE(s_ab.bitten);
+    run(2000, 0, 0);                     /* then silence                  */
+    a = can_ab_adopt(&s_ab, 500, s_now, s_frames, s_bad, &taken);
+    TEST_ASSERT_FALSE(taken);
+    TEST_ASSERT_FALSE(s_ab.normal);
+
+    /* NULL is harmless */
+    a = can_ab_adopt(NULL, 500, 0, 0, 0, &taken);
+    TEST_ASSERT_FALSE(taken);
+    TEST_ASSERT_FALSE(a.apply);
+    a = can_ab_adopt(&s_ab, 500, s_now, s_frames, s_bad, NULL);
+    TEST_ASSERT_FALSE(a.apply);
+}
+
 void run_autobaud_tests(void)
 {
     RUN_TEST(test_ab_always_starts_listen_only);
@@ -554,4 +678,6 @@ void run_autobaud_tests(void)
     RUN_TEST(test_ab_runtime_mode_requests);
     RUN_TEST(test_ab_wraparound_time_and_counters);
     RUN_TEST(test_ab_null_and_empty_config);
+    RUN_TEST(test_ab_adopts_a_stated_bitrate_on_a_silent_auto_bus);
+    RUN_TEST(test_ab_adopt_is_refused_without_a_silent_auto_bus);
 }

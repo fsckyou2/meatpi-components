@@ -37,6 +37,16 @@ with this node "listening" at 500k). So:
 - A silent bus has no bitrate. A FIXED bitrate goes to its configured mode
   after 300 ms of silence, as the node always did (a gatewayed OBD port only
   answers when asked); `auto` keeps listening.
+- `auto` on a silent bus takes a bitrate a tester states (2026-10-17,
+  `can_manager_adopt_baud()`: a J2534 CONNECT's baud, python-can's `S6` on an
+  slcan connection): the node runs at it in the configured mode, `adopted`
+  and unverified, until frames prove it or the watchdog demotes it; refused
+  when the bus is not silent, was bitten, or the rate is not a candidate. A
+  fixed bitrate is never overruled. Until something states it every transmit
+  is refused, and the first refusal of an episode is logged
+  (`W can_core: transmit refused: the node may not talk, ...`): a field
+  report had read the silent refusal as "J2534 connected, no comm to the
+  CAN bus".
 - A node that talks and meets traffic it cannot read is demoted at once (the
   error interrupt wakes the RX task every 8 errors; measured cost: 5 to 6
   destroyed frames). After that, silence no longer promotes it: only frames.

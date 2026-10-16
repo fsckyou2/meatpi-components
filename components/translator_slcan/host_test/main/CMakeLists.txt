@@ -8,6 +8,7 @@ idf_component_register(
     SRCS "test_main.c"
          "${comp_dir}/translator_slcan_codec.c"
     INCLUDE_DIRS
+        "${comp_dir}"
         "${root}/bridge_manager/include"
         "${root}/can_manager/include"
     REQUIRES unity

@@ -30,8 +30,25 @@
 #include "esp_log.h"
 
 #include "bridge_manager.h"
+#include "can_manager.h"
+
+#include "translator_slcan_private.h"
+
+static const char *TAG = "translator_slcan";
 
 extern const bridge_translator_t translator_slcan_desc;
+
+/* an slcan client stated the bitrate (S<n> on open): taken by the node
+   only when it has no verdict of its own, `auto` on a silent bus
+   (2026-10-17); otherwise the command is absorbed as it always was */
+static void slcan_state_bitrate(uint16_t kbps)
+{
+    if (can_manager_adopt_baud(kbps) == ESP_OK)
+    {
+        ESP_LOGI(TAG, "the client stated %u kbit/s: the bus was silent, "
+                      "the node now runs there", (unsigned)kbps);
+    }
+}
 
 esp_err_t translator_slcan_init(void)
 {
@@ -39,7 +56,8 @@ esp_err_t translator_slcan_init(void)
 
     if (err == ESP_OK)
     {
-        ESP_LOGI("translator_slcan", "registered 'slcan' codec");
+        slcan_bitrate_hook = slcan_state_bitrate;
+        ESP_LOGI(TAG, "registered 'slcan' codec");
     }
     return err;
 }

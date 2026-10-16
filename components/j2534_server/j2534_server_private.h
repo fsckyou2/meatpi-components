@@ -54,6 +54,7 @@ volatile const bool *j2534_srv_run_flag(void);
 uint8_t  *j2534_srv_req_payload(size_t *cap);       /* PSRAM, one session */
 void      j2534_srv_count_rx(void);
 void      j2534_srv_count_tx(void);
+void      j2534_srv_count_tx_refused(void); /* a write the CAN node refused */
 void      j2534_srv_session_begin(const char *transport_name);
 void      j2534_srv_session_end(void);
 void      j2534_srv_handle_frame(const j2534_transport_t *t,

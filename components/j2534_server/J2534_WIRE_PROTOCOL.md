@@ -98,7 +98,14 @@ that asks for another bitrate than the bus runs at (the device's setting,
 or what its listen-before-talk policy read off the wire) gets
 `ERR_INVALID_BAUDRATE` instead of a channel at the wrong rate. Whole
 kbit/s decide (83333 matches the setting `83`); with `can_manager.baud =
-auto` and nothing detected yet any baud is accepted. `flags` bit `0x100`
+auto` and nothing proven yet the tester's baud is TAKEN when the bus has
+been silent (2026-10-17, `can_manager_adopt_baud()`): the node then runs
+there in the configured mode until frames prove it or the watchdog demotes
+it, and the next `CONNECT` is checked against that rate. When it cannot be
+taken (the bus not silent, unreadable traffic seen earlier, or not a rate
+this node knows) the channel still opens, `WRITE_MSGS` answers
+`ERR_FAILED`, the device logs one `W j2534_server: ... write refused` line
+per `CONNECT` and counts `tx_refused` on `/api/j2534`. `flags` bit `0x100`
 (`TX_CAN_29BIT_ID`) selects 29-bit
 ids; `tx_id`/`rx_id` are optional (for ISO15765 they may instead come
 from a FLOW_CONTROL filter). Errors: `ERR_DEVICE_NOT_CONNECTED` before

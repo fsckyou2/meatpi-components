@@ -20,9 +20,15 @@ node runs at the `can_manager` setting, or at what its listen-before-talk
 policy read off the bus. `CONNECT` (CAN or ISO15765) with another baud is
 answered `ERR_INVALID_BAUDRATE` instead of a channel that reads and writes
 at the wrong rate (the baud was ignored before). With `can_manager.baud =
-auto` and nothing detected yet the channel opens, and writes fail until the
-bus shows traffic: for an ECU alone on a desk (silent until asked) set the
-bitrate. Pure rule: `j2534_connect_baud_check()`.
+auto` and nothing proven yet the tester's baud is taken when the bus has
+been silent (2026-10-17, `can_manager_adopt_baud()`: a gatewayed OBD port
+speaks only when asked, and a tester there read the refused writes as
+"connected, no comm to the CAN bus"); the node runs at it until frames
+prove it or the watchdog demotes it. When it cannot be taken (the bus not
+silent, unreadable traffic seen, a rate this node does not know) the
+channel opens and writes answer `ERR_FAILED`: one `W` line per `CONNECT`,
+`tx_refused` on `/api/j2534`, and can_core's own `W transmit refused`
+line names the cause. Pure rule for the check: `j2534_connect_baud_check()`.
 
 Layout (each file under the 700-line cap):
 

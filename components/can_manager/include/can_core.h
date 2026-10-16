@@ -175,6 +175,7 @@ typedef struct
     bool     autobaud;       /**< More than one candidate.                   */
     bool     listen_only;    /**< The node cannot transmit right now.        */
     bool     verified;       /**< Frames were read at this bitrate.          */
+    bool     adopted;        /**< Running at a bitrate a tester stated.      */
     uint32_t switches;       /**< Auto: candidate changes.                   */
     uint32_t demotions;      /**< Normal -> listen-only by the watchdog.     */
 } can_core_link_t;
@@ -279,6 +280,8 @@ typedef struct can_core_handle_s
     volatile bool        node_listen;   /**< Node is listen-only (no TX pin).  */
     volatile bool        tx_open;       /**< Transmit allowed: normal mode, up. */
     volatile int         tx_users;      /**< Transmits in flight (the gate).   */
+    volatile bool        tx_refused_said; /**< The refusal was logged once this
+                                               listen-only episode.          */
     volatile bool        initialised;                     /**< Init flag.    */
     volatile bool        reconfiguring;                   /**< Driver reconfigure in progress. */
     volatile bool        rx_parked;   /**< RX task ack: parked outside twai_receive. */
@@ -495,6 +498,23 @@ elm327_err_t can_core_set_silent_mode(can_core_handle_t *handle,
  */
 elm327_err_t can_core_set_baud(can_core_handle_t *handle,
                                   uint32_t baud_kbps);
+
+/**
+ * @brief A tester states the bus bitrate (a J2534 CONNECT, slcan's S).
+ *
+ * Taken only when the link policy has no verdict of its own: more than one
+ * candidate (`auto`) with nothing proven, the bus silent for
+ * CAN_AB_SILENT_MS at the candidate in use, never bitten
+ * (can_ab_adopt). The node then runs at that bitrate in the configured
+ * mode, `adopted` and unverified; the watchdog demotes it on the first
+ * unreadable traffic. A fixed bitrate is never overruled.
+ *
+ * @param[out] adopted  True when the statement was taken (may be NULL).
+ * @return ELM327_OK (look at @p adopted), ELM327_ERR_NOT_INIT, or the
+ *         node restart's error.
+ */
+elm327_err_t can_core_adopt_baud(can_core_handle_t *handle,
+                                 uint32_t baud_kbps, bool *adopted);
 
 #ifdef __cplusplus
 }

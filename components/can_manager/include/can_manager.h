@@ -100,6 +100,28 @@ esp_err_t can_manager_send(uint32_t id, bool ext, bool rtr,
  *  has another path (UDS over the OBD chip) asks this, not "is CAN up". */
 bool can_manager_tx_ready(void);
 
+/**
+ * @brief A tester states the bus bitrate (a J2534 CONNECT's baud, an slcan
+ *        client's `S` command).
+ *
+ * Taken only when the link policy has no verdict of its own: `baud = auto`
+ * with nothing proven, the bus silent for 300 ms at the candidate in use,
+ * never bitten (can_ab_adopt). The node then runs at that bitrate in the
+ * configured mode, `adopted` and unverified, until frames prove it or the
+ * watchdog demotes it on the first unreadable traffic. A fixed bitrate is
+ * never overruled: a tester that disagrees with it is told by its own
+ * protocol (J2534 ERR_INVALID_BAUDRATE). Born 2026-10-17 from a J2534 tester
+ * on a gatewayed OBD port that speaks only when asked: with `auto` the
+ * session opened and every write was refused ("connected, no comm").
+ *
+ * @return ESP_OK taken (the node bounced to that bitrate);
+ *         ESP_ERR_NOT_SUPPORTED not taken (fixed bitrate, a verdict exists,
+ *         the bus is not silent, bitten, or not a bitrate this node knows);
+ *         ESP_ERR_INVALID_STATE before the bus is up; ESP_FAIL when the node
+ *         could not be restarted.
+ */
+esp_err_t can_manager_adopt_baud(uint32_t baud_kbps);
+
 /** Subscribe a task-owned queue of can_core_frame_t (drop-oldest when
  *  full). monitor_all=true bypasses filter/mask. Returns the subscriber
  *  index via out_idx (>=0) for later unsubscribe. */

@@ -41,6 +41,8 @@
 #include "bridge_manager.h"
 #include "can_frame_wire.h"
 
+#include "translator_slcan_private.h"
+
 /* client command assembly: one '\r'-terminated line at a time. SLCAN_MTU is
  * ~30; 48 gives headroom. Used by encode; decode ignores it. */
 typedef struct
@@ -173,6 +175,23 @@ static size_t slcan_format_line(const can_core_frame_t *fp, char *out)
     return (size_t)i;
 }
 
+/* ---- the stated bitrate (translator_slcan_private.h) ------------------- */
+
+void (*slcan_bitrate_hook)(uint16_t kbps) = NULL;
+
+uint16_t slcan_bitrate_kbps(char code)
+{
+    static const uint16_t KBPS[] =
+        { 10, 20, 50, 100, 125, 250, 500, 800, 1000, 83 }; /* S0 .. S9 */
+
+    if (code < '0' || code > '9')
+    {
+        return 0;
+    }
+
+    return KBPS[code - '0'];
+}
+
 /* ---- encode: one completed slcan line → CAN-wire chunk ----------------- */
 
 static esp_err_t emit_frame(const char *line, uint8_t n,
@@ -189,6 +208,19 @@ static esp_err_t emit_frame(const char *line, uint8_t n,
 
     if (type == 't' || type == 'r') { f.ext = false; id_len = 3; }
     else if (type == 'T' || type == 'R') { f.ext = true; id_len = 8; }
+    else if (type == 'S' && n == 2)
+    {
+        /* the client states the bus bitrate (python-can: S6 on open);
+           the hook takes it when the node has no verdict of its own */
+        uint16_t kbps = slcan_bitrate_kbps(line[1]);
+
+        if (kbps != 0 && slcan_bitrate_hook != NULL)
+        {
+            slcan_bitrate_hook(kbps);
+        }
+
+        return ESP_OK;
+    }
     else return ESP_OK; /* not a frame line */
 
     f.rtr = (type == 'r' || type == 'R');

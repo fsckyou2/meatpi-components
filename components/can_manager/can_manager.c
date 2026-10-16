@@ -314,6 +314,35 @@ bool can_manager_tx_ready(void)
     return s_running && s_bus.tx_open;
 }
 
+esp_err_t can_manager_adopt_baud(uint32_t baud_kbps)
+{
+    if (!s_running)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    bool adopted = false;
+
+    if (s_life != NULL)
+    {
+        xSemaphoreTake(s_life, portMAX_DELAY); /* not under a probe */
+    }
+
+    elm327_err_t rc = can_core_adopt_baud(&s_bus, baud_kbps, &adopted);
+
+    if (s_life != NULL)
+    {
+        xSemaphoreGive(s_life);
+    }
+
+    if (rc != ELM327_OK)
+    {
+        return ESP_FAIL;
+    }
+
+    return adopted ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+}
+
 esp_err_t can_manager_subscribe_queue(QueueHandle_t q, uint32_t filter,
                                       uint32_t mask, bool ext,
                                       bool monitor_all, int *out_idx)

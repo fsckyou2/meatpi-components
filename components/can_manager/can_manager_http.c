@@ -74,6 +74,7 @@ static esp_err_t can_get_handler(httpd_req_t *req)
              "{\"enabled\":%s,\"running\":%s,\"silent\":%s,"
              "\"baud_auto\":%s,\"baud_kbps\":%lu,\"baud_detected\":%lu,"
              "\"state\":\"%s\",\"listen_only\":%s,\"verified\":%s,"
+             "\"adopted\":%s,"
              "\"tx\":%lu,\"rx\":%lu,\"tx_errors\":%lu,\"rx_errors\":%lu,"
              "\"arb_lost\":%lu,\"bus_errors\":%lu,"
              "\"rx_missed\":%lu,\"rx_overrun\":%lu,"
@@ -91,6 +92,7 @@ static esp_err_t can_get_handler(httpd_req_t *req)
              state,
              st.link.listen_only ? "true" : "false",
              st.link.verified ? "true" : "false",
+             st.link.adopted ? "true" : "false",
              (unsigned long)st.stats.tx_count,
              (unsigned long)st.stats.rx_count,
              (unsigned long)st.stats.tx_errors,

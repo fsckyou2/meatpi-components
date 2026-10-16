@@ -143,11 +143,13 @@ document.head.append(h("style",{},CSS));
 
 /* /api/can: the node listens before it talks (state detecting | listening |
    mismatch until its verdict; listen_only = what it may do right now) */
-const canRate=c=>c.baud_auto&&!c.verified?"auto":(c.baud_kbps>=1000?(c.baud_kbps/1000)+"M":c.baud_kbps+"k");
-const canNote=c=>c.state==="detecting"?" · detecting":c.state==="mismatch"?" · other bit rate":c.state==="listening"?" · listening":c.listen_only||c.silent?" · listen-only":"";
+const canRate=c=>c.baud_auto&&!c.verified&&!c.adopted?"auto":(c.baud_kbps>=1000?(c.baud_kbps/1000)+"M":c.baud_kbps+"k");
+const canNote=c=>c.state==="detecting"?" · detecting":c.state==="mismatch"?" · other bit rate":c.state==="listening"?" · listening":c.adopted&&!c.verified?" · from the tester":c.listen_only||c.silent?" · listen-only":"";
+/* detecting on a bus that only answers when asked never ends (2026-10-17):
+   a J2534 or slcan tool states the rate by itself, the monitor's user sets it */
 const canWhyNoTx=c=>c.silent?"The bus is in listen-only mode: nothing is sent"
   :c.state==="mismatch"?"The bus runs at another bit rate than the one set here: nothing is sent"
-  :c.state==="detecting"?"No bit rate detected yet: nothing is sent until the bus shows traffic"
+  :c.state==="detecting"?"No bit rate detected yet: a bus that only answers when asked cannot be found by listening. Set the bit rate under CAN INTERFACE to send from here (a J2534 or slcan tool states it by itself)"
   :"The CAN node is still listening before it talks: nothing is sent yet";
 const BAUDS=[["auto","Automatic"],["33","33 kbit/s"],["83","83 kbit/s"],["95","95 kbit/s"],["100","100 kbit/s"],["125","125 kbit/s"],["250","250 kbit/s"],["500","500 kbit/s"],["1000","1 Mbit/s"]];
 const PREF_KEY="wican.canmon.v1";

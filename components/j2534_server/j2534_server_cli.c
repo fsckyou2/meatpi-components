@@ -57,6 +57,8 @@ static int cmd_j2534(int argc, char **argv)
     cmdline_printf("  frames rx/tx: %lu / %lu\n",
                    (unsigned long)st.frames_rx,
                    (unsigned long)st.frames_tx);
+    cmdline_printf("  tx refused  : %lu (the CAN node may not talk yet)\n",
+                   (unsigned long)st.tx_refused);
     cmdline_printf("OK\n");
     return 0;
 }
