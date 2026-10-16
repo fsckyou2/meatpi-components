@@ -31,16 +31,11 @@
 #include "vpn_manager.h"
 #include "vpn_manager_private.h"
 
+/* the public words (one table, issue #985); the console spells the wait out */
 static const char *state_str(vpn_state_t st)
 {
-    switch (st)
-    {
-        case VPN_STATE_WAITING:    return "waiting for network/time";
-        case VPN_STATE_PAUSED:     return "paused";
-        case VPN_STATE_CONNECTING: return "connecting";
-        case VPN_STATE_CONNECTED:  return "connected";
-        default:                   return "disabled";
-    }
+    return st == VPN_STATE_WAITING ? "waiting for network/time"
+                                   : vpn_manager_state_str(st);
 }
 
 static int cmd_vpn(int argc, char **argv)

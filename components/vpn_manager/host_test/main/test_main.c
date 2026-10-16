@@ -4,7 +4,9 @@
  *        key shape, endpoint sanity, the enabled-config ladder, and
  *        the tailscale validation branch.
  *        Since 2026-10-11 also the routes list (issue #975) and the v1
- *        allowed_ip + mask conversion. Expected output: 10 Tests 0
+ *        allowed_ip + mask conversion (since 2026-10-16 the network the
+ *        tunnel address names, issue #988), and the state words every
+ *        surface shares (issue #985). Expected output: 11 Tests 0
  *        Failures 0 Ignored.
  */
 #include <string.h>
@@ -183,24 +185,77 @@ static void test_legacy_allowed_ip_converts(void)
 {
     char out[24];
 
-    TEST_ASSERT_TRUE(vpn_check_legacy_route("10.66.0.0", "255.255.255.0",
-                                            out, sizeof(out)));
+    /* AllowedIPs = the tunnel subnet: the same network either way */
+    TEST_ASSERT_TRUE(vpn_check_legacy_route("10.66.0.2", "10.66.0.0",
+                                            "255.255.255.0", out,
+                                            sizeof(out)));
     TEST_ASSERT_EQUAL_STRING("10.66.0.0/24", out);
-    TEST_ASSERT_TRUE(vpn_check_legacy_route("192.168.1.5", "255.255.0.0",
-                                            out, sizeof(out)));
+    /* issue #988: AllowedIPs names another network. v1 routed the tunnel
+       address under the mask (the netif's own network), never the
+       AllowedIPs network: the migration keeps what the device did */
+    TEST_ASSERT_TRUE(vpn_check_legacy_route("10.6.0.2", "192.168.86.0",
+                                            "255.255.255.0", out,
+                                            sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("10.6.0.0/24", out);
+    /* the address may carry its own /cidr: stripped, the host bits kept */
+    TEST_ASSERT_TRUE(vpn_check_legacy_route("10.6.0.2/8", "192.168.1.5",
+                                            "255.255.0.0", out,
+                                            sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("10.6.0.0/16", out);
+    /* no usable address: the pair's own network, as before */
+    TEST_ASSERT_TRUE(vpn_check_legacy_route(NULL, "192.168.1.5",
+                                            "255.255.0.0", out,
+                                            sizeof(out)));
     TEST_ASSERT_EQUAL_STRING("192.168.0.0/16", out);
+    TEST_ASSERT_TRUE(vpn_check_legacy_route("", "10.66.0.0",
+                                            "255.255.255.0", out,
+                                            sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("10.66.0.0/24", out);
+    TEST_ASSERT_TRUE(vpn_check_legacy_route("junk", "10.66.0.0",
+                                            "255.255.255.0", out,
+                                            sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("10.66.0.0/24", out);
     /* the 0.0.0.0 idiom (nothing but default_route), a mask with holes
        and garbage are dropped */
-    TEST_ASSERT_FALSE(vpn_check_legacy_route("0.0.0.0", "0.0.0.0", out,
+    TEST_ASSERT_FALSE(vpn_check_legacy_route("10.6.0.2", "0.0.0.0",
+                                             "0.0.0.0", out, sizeof(out)));
+    TEST_ASSERT_FALSE(vpn_check_legacy_route("10.6.0.2", "10.66.0.0",
+                                             "0.0.0.0", out, sizeof(out)));
+    TEST_ASSERT_FALSE(vpn_check_legacy_route("10.6.0.2", "10.66.0.0",
+                                             "255.0.255.0", out,
                                              sizeof(out)));
-    TEST_ASSERT_FALSE(vpn_check_legacy_route("10.66.0.0", "0.0.0.0", out,
+    TEST_ASSERT_FALSE(vpn_check_legacy_route("10.6.0.2", "nonsense",
+                                             "255.255.255.0", out,
                                              sizeof(out)));
-    TEST_ASSERT_FALSE(vpn_check_legacy_route("10.66.0.0", "255.0.255.0",
-                                             out, sizeof(out)));
-    TEST_ASSERT_FALSE(vpn_check_legacy_route("nonsense", "255.255.255.0",
-                                             out, sizeof(out)));
-    TEST_ASSERT_FALSE(vpn_check_legacy_route(NULL, "255.255.255.0", out,
+    TEST_ASSERT_FALSE(vpn_check_legacy_route("10.6.0.2", NULL,
+                                             "255.255.255.0", out,
                                              sizeof(out)));
+}
+
+static void test_state_words_cover_every_state(void)
+{
+    /* issue #985: the HA push indexed a 4-entry table with the 5-value
+       enum; the words live in one place now and every state has one */
+    TEST_ASSERT_EQUAL_STRING("disabled",
+                             vpn_manager_state_str(VPN_STATE_DISABLED));
+    TEST_ASSERT_EQUAL_STRING("waiting",
+                             vpn_manager_state_str(VPN_STATE_WAITING));
+    TEST_ASSERT_EQUAL_STRING("paused", vpn_manager_state_str(VPN_STATE_PAUSED));
+    TEST_ASSERT_EQUAL_STRING("connecting",
+                             vpn_manager_state_str(VPN_STATE_CONNECTING));
+    TEST_ASSERT_EQUAL_STRING("connected",
+                             vpn_manager_state_str(VPN_STATE_CONNECTED));
+
+    for (int a = 0; a <= (int)VPN_STATE_CONNECTED; a++)
+    {
+        for (int b = a + 1; b <= (int)VPN_STATE_CONNECTED; b++)
+        {
+            TEST_ASSERT_NOT_EQUAL(0, strcmp(vpn_manager_state_str(a),
+                                            vpn_manager_state_str(b)));
+        }
+    }
+
+    TEST_ASSERT_EQUAL_STRING("disabled", vpn_manager_state_str(99));
 }
 
 void app_main(void)
@@ -216,5 +271,6 @@ void app_main(void)
     RUN_TEST(test_tailscale_rejects);
     RUN_TEST(test_routes_list_rules);
     RUN_TEST(test_legacy_allowed_ip_converts);
+    RUN_TEST(test_state_words_cover_every_state);
     UNITY_END();
 }

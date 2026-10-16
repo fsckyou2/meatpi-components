@@ -73,11 +73,14 @@ const char *vpn_check_config(const vpn_config_t *cfg);
 #define VPN_MAX_ROUTES 8
 bool vpn_check_routes(const char *routes, char *err, size_t err_len);
 
-/* settings v1 -> v2: the old allowed_ip + allowed_ip_mask pair as ONE route
- * ("a.b.c.d/n"); false for the 0.0.0.0 idiom, a non-contiguous mask or
- * a malformed pair */
-bool vpn_check_legacy_route(const char *ip, const char *mask, char *out,
-                            size_t len);
+/* settings v1 -> v2: the network v1 actually routed, as ONE route
+ * ("a.b.c.d/n"): the tunnel `address` under allowed_ip_mask (v1 gave the
+ * netif the address with that netmask, so lwIP routed address & mask; the
+ * AllowedIPs address itself only contributed the mask, issue #988). Without
+ * a usable address the pair's own network is taken. False for the 0.0.0.0
+ * idiom, a non-contiguous mask or a malformed pair */
+bool vpn_check_legacy_route(const char *address, const char *ip,
+                            const char *mask, char *out, size_t len);
 
 /* ---- vpn_manager_wg.c: esp_wireguard glue (state task ONLY) ------------- */
 

@@ -159,8 +159,46 @@ bool vpn_check_routes(const char *routes, char *err, size_t err_len)
            >= 0;
 }
 
-bool vpn_check_legacy_route(const char *ip, const char *mask, char *out,
-                            size_t len)
+const char *vpn_manager_state_str(vpn_state_t state)
+{
+    /* a switch, not a table: nothing to index past (issue #985) */
+    switch (state)
+    {
+        case VPN_STATE_WAITING:    return "waiting";
+        case VPN_STATE_PAUSED:     return "paused";
+        case VPN_STATE_CONNECTING: return "connecting";
+        case VPN_STATE_CONNECTED:  return "connected";
+        case VPN_STATE_DISABLED:
+        default:                   return "disabled";
+    }
+}
+
+/* the tunnel address as a /32 entry, any "/n" suffix ignored (v1 stripped
+ * it the same way before handing the address to the netif) */
+static bool parse_bare_address(const char *address, ip4_routes_entry_t *out)
+{
+    char bare[32];
+
+    if (address == NULL)
+    {
+        return false;
+    }
+
+    snprintf(bare, sizeof(bare), "%s", address);
+
+    char *slash = strchr(bare, '/');
+
+    if (slash != NULL)
+    {
+        *slash = '\0';
+    }
+
+    return ip4_routes_parse_cidr(bare, out) && out->mask == 0xFFFFFFFFu &&
+           out->network != 0;
+}
+
+bool vpn_check_legacy_route(const char *address, const char *ip,
+                            const char *mask, char *out, size_t len)
 {
     ip4_routes_entry_t a;
     ip4_routes_entry_t m;
@@ -184,7 +222,13 @@ bool vpn_check_legacy_route(const char *ip, const char *mask, char *out,
         return false; /* the 0.0.0.0 idiom, or a mask with holes */
     }
 
-    ip4_routes_entry_t e = { .network = a.network & mv, .mask = mv };
+    /* v1 routed the netif's own network: the tunnel ADDRESS under the
+       mask (issue #988). The AllowedIPs address only ever contributed
+       the mask; it is the fallback when the stored address is unusable. */
+    ip4_routes_entry_t host;
+    uint32_t           base = parse_bare_address(address, &host) ? host.network
+                                                                : a.network;
+    ip4_routes_entry_t e = { .network = base & mv, .mask = mv };
 
     ip4_routes_format(&e, out, len);
     return true;

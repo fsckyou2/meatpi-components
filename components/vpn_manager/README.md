@@ -22,7 +22,13 @@ tunnel IP, optional /cidr: ALWAYS the WG netif address, netmask /32),
 routed into the tunnel through `ip4_routes`, the tunnel's own network
 included, e.g. `10.66.0.0/24, 192.168.1.0/24`; `""` = nothing but
 `default_route`; a v1 `allowed_ip` + `allowed_ip_mask` pair migrates to
-one route, the 0.0.0.0 idiom to an empty list), `endpoint`,
+one route, the network v1 actually routed: the tunnel `address` under
+that mask, since the AllowedIPs address itself only ever set the netmask
+(issue #988, 2026-10-16: the first cut of the migration took the
+AllowedIPs network, so address 10.6.0.2 with AllowedIPs 192.168.86.0/24
+lost the peer's subnet and pulled the LAN into the tunnel; a unit that
+migrated on alfa-04 keeps its migrated list, check Routes there); the
+0.0.0.0 idiom migrates to an empty list), `endpoint`,
 `port` (51820),
 `keepalive_s` (25), `default_route` (false: meatpi: only the allowed
 range routes), `dns` (optional override, saved/restored around the
@@ -84,6 +90,25 @@ station's.
 - `POST /api/vpn/keygen`: `{public_key, pending_reboot:true}`.
 - CLI `vpn`, same status as text.
 - Event source `vpn.state {connected, paused, network}`.
+- `vpn_manager_state_str(state)` (public header): the state word above,
+  the ONE table every surface uses, the HA push's `vpn_status` included
+  (issue #985, 2026-10-16: ha_webhooks kept a four-entry copy that
+  `VPN_STATE_PAUSED` outgrew, so `connected` indexed past it and `paused`
+  read "connecting"). Never NULL.
+
+## API (`include/vpn_manager.h`)
+
+| Call | Behavior |
+|---|---|
+| `vpn_manager_init()` | registers the settings, log and event descriptors; no network access |
+| `vpn_manager_start()` | creates the state task when enabled (network-gated inside) |
+| `vpn_manager_stop()` | tears the tunnel down; the state task parks |
+| `vpn_manager_status(out)` | the snapshot: state, type, paused, network, endpoint, counters |
+| `vpn_manager_state_str(state)` | the wire word of a state (pure, host-tested) |
+| `vpn_manager_tunnel_ip(buf, len)` | the device's own tunnel address while connected, else `ESP_ERR_INVALID_STATE` |
+| `vpn_manager_keygen(pub, len)` | a device-side keypair; the private key goes to pending settings, only the public key comes back |
+| `vpn_manager_register_http()` | the `/api/vpn` routes (main wires it) |
+| `vpn_manager_register_cli()` | the `vpn` command (called from the settings apply behind `cli`) |
 
 ## MQTT-behind-the-tunnel
 
@@ -95,5 +120,6 @@ latency ever hurts, add a rule on `vpn.state`.
 
 PSRAM: 6 KB state-task stack, plus the two peer-snapshot tables of the HTTP and CLI surfaces (1.3 KB each, PSRAM since 2026-09-22). Internal: FreeRTOS objects + the lwip
 netif esp_wireguard creates while up. Host tests: `host_test/`
-(6 tests, pure config checks). Bench: WireGuard server on rpi001,
+(11 tests: the pure config checks, the routes list, the v1 route
+migration, the state words). Bench: WireGuard server on rpi001,
 LOCAL-ONLY (TASK §3.1), handshake + ping + MQTT-through-tunnel.

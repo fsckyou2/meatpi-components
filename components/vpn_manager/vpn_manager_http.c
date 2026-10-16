@@ -42,18 +42,6 @@
 
 static const char *TAG = "vpn_manager";
 
-static const char *state_str(vpn_state_t st)
-{
-    switch (st)
-    {
-        case VPN_STATE_WAITING:    return "waiting";
-        case VPN_STATE_PAUSED:     return "paused";
-        case VPN_STATE_CONNECTING: return "connecting";
-        case VPN_STATE_CONNECTED:  return "connected";
-        default:                   return "disabled";
-    }
-}
-
 #define VPN_HTTP_MAX_PEERS 16 /* microlink's default peer-table size */
 
 static esp_err_t vpn_get_handler(httpd_req_t *req)
@@ -70,7 +58,7 @@ static esp_err_t vpn_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    cJSON_AddStringToObject(obj, "state", state_str(st.state));
+    cJSON_AddStringToObject(obj, "state", vpn_manager_state_str(st.state));
     cJSON_AddStringToObject(obj, "type",
                             st.tailscale ? "tailscale" : "wireguard");
     cJSON_AddStringToObject(obj, "endpoint", st.endpoint);

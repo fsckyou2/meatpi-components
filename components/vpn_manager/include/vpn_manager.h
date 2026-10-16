@@ -95,6 +95,13 @@ esp_err_t vpn_manager_stop(void);
 
 esp_err_t vpn_manager_status(vpn_manager_status_t *out);
 
+/** The wire word of a state: "disabled", "waiting", "paused",
+ *  "connecting" or "connected", what `GET /api/vpn` `state` and the HA
+ *  push `vpn_status` carry. ONE table for every surface (issue #985: the
+ *  HA push kept a 4-entry copy that PAUSED outgrew). Never NULL; an
+ *  unknown value reads "disabled". Pure (vpn_manager_check.c). */
+const char *vpn_manager_state_str(vpn_state_t state);
+
 /** The device's OWN tunnel address while CONNECTED: WireGuard: the
  *  configured `address` (any /cidr stripped); Tailscale: the live
  *  tailnet 100.x IP. Consumers: the HA webhook push (`vpn_ip`, HA

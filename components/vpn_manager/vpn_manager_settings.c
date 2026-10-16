@@ -181,14 +181,20 @@ static esp_err_t on_apply(const cJSON *settings)
     return ESP_OK;
 }
 
-/* v1 -> v2 (issue #975): ONE network through the netif netmask (allowed_ip +
- * allowed_ip_mask) becomes the first entry of `routes`; the 0.0.0.0 idiom
- * (nothing but default_route) becomes an empty list. The two old keys are
+/* v1 -> v2 (issue #975): ONE network through the netif netmask becomes the
+ * first entry of `routes`; the 0.0.0.0 idiom (nothing but default_route)
+ * becomes an empty list. The network is the one v1 routed: the tunnel
+ * `address` under `allowed_ip_mask` (issue #988: the first cut took the
+ * AllowedIPs address instead, which v1 never used beyond its mask, so a
+ * pair like address 10.6.0.2 + AllowedIPs 192.168.86.0/24 lost the peer's
+ * own subnet and pulled a LAN into the tunnel). The two old keys are
  * dropped. Pure part: vpn_check_legacy_route (host-tested). */
 static esp_err_t on_migrate(uint32_t from_version, cJSON *settings)
 {
     if (from_version < 2 && settings != NULL)
     {
+        const cJSON *addr = cJSON_GetObjectItemCaseSensitive(settings,
+                                                             "address");
         const cJSON *ip = cJSON_GetObjectItemCaseSensitive(settings,
                                                            "allowed_ip");
         const cJSON *mask = cJSON_GetObjectItemCaseSensitive(
@@ -196,7 +202,9 @@ static esp_err_t on_migrate(uint32_t from_version, cJSON *settings)
         char route[24];
 
         if (cJSON_IsString(ip) && cJSON_IsString(mask) &&
-            vpn_check_legacy_route(ip->valuestring, mask->valuestring,
+            vpn_check_legacy_route(cJSON_IsString(addr) ? addr->valuestring
+                                                        : NULL,
+                                   ip->valuestring, mask->valuestring,
                                    route, sizeof(route)))
         {
             cJSON_DeleteItemFromObject(settings, "routes");
