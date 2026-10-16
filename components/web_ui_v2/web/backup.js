@@ -36,6 +36,9 @@ const when=iso=>{if(!iso)return"unknown date";const d=new Date(iso);return isNaN
 const today=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");};
 const heading=(t,first)=>h("div",{class:"bk-h",style:"font-size:12px;font-weight:600;color:var(--text-3);text-transform:uppercase;letter-spacing:.04em;"+(first?"margin-top:6px":"margin-top:18px;padding-top:14px;border-top:1px solid var(--border)")},t);
 const hasData=(p,d)=>!!d&&(p.id==="dashboard"?d.present:true);
+/* what a part leaves out (issue #989): [{name, why}], the last one a bare
+   "and N more"; a note under the row instead of a silent gap */
+const leftOut=(l,lead)=>Array.isArray(l)&&l.length?lead+": "+l.map(x=>x.name?x.name+" ("+x.why+")":x.why).join(", ")+".":null;
 
 /* one row of a parts list: tick | words | count and size (or why it is out) */
 function partRow(p,data,picked,onPick,state){
@@ -81,7 +84,7 @@ function backupCard(st,repaintAll){
   const foot=h("div",{class:"help",style:"margin-top:8px"});
   function paint(){
     list.replaceChildren(...PARTS.map(p=>partRow(p,st.parts[p.id],picked,(id,on)=>{if(on)picked.add(id);else picked.delete(id);paint();},
-      {blocked:p.localOnly?"Never leave the device: kept in the copies on the device, below":null})));
+      {blocked:p.localOnly?"Never leave the device: kept in the copies on the device, below":null,note:leftOut((st.parts[p.id]||{}).left_out,"Not in the backup")})));
     const usable=PARTS.filter(p=>!p.localOnly&&hasData(p,st.parts[p.id]));
     const n=usable.filter(p=>picked.has(p.id)).length;
     master.checked=n===usable.length&&n>0;master.indeterminate=n>0&&n<usable.length;
@@ -113,10 +116,15 @@ function backupCard(st,repaintAll){
 
 /* ---- card 2: the copies the device keeps for itself ---- */
 function copiesCard(st,repaintAll,autoRows){
-  const c=st.copies||{internal:{},sd:{}};
+  /* read through st: a repaint swaps st.copies for a fresh object */
+  const cur=()=>st.copies||{internal:{},sd:{}};
   const key=keyBits(st,repaintAll);
   const rows=h("div",{class:"bk-copies"});
   const refreshBtn=h("button",{class:"btn sm bk-refresh",onclick:async()=>{
+    const c=cur();
+    /* a copy held since a factory reset (issue #987) is the undo: a refresh
+       lets it go, so it asks first */
+    if(((c.internal||{}).held||(c.sd||{}).held)&&!await confirmModal("A copy holds the settings from before the factory reset. Refreshing replaces them with the settings this WiCAN has now, and the undo is gone. To undo the reset instead, use Restore on that copy.","Let the copies follow the device again?"))return;
     refreshBtn.disabled=true;
     try{const r=await api("/api/backup/copies/refresh",{method:"POST"});toast("Copies refreshed: "+(r.written||[]).join(", "),"ok");await repaintAll(true);}
     catch(e){toast(e.message,"err");}
@@ -126,12 +134,17 @@ function copiesCard(st,repaintAll,autoRows){
     h("div",{class:"ctl"},h("div",{class:"rowflex",style:"gap:10px;flex-wrap:wrap"},key.btn,key.state)),
     h("div",{class:"help"},"Made once on this device from its hardware random source and kept outside the settings, so a factory reset keeps it. Keep the key file apart from the backups. It is the same key that seals an encrypted download."));
   function placeRow(title,sub,data,where){
-    const words=h("div",{},h("b",{style:"font-size:13.5px"},title),h("div",{class:"help"},sub));
+    /* held (issue #987): the settings part is the one from before the factory
+       reset until the user restores it or lets the copy go */
+    const held=!!(data&&data.present&&data.held);
+    const words=h("div",{},h("b",{style:"font-size:13.5px"},title),h("div",{class:"help"},held?"Holding the settings from before the factory reset"+(data.held_since?" of "+day(data.held_since):"")+". Restore to undo the reset, or refresh the copies to let them follow the device again.":sub));
     let right;
     if(!data||!data.present){
       right=h("div",{class:"help",style:"text-align:right;max-width:200px"},data&&data.card===false?"No SD card in the slot":"No copy yet");
     }else{
-      right=h("div",{class:"rowflex",style:"gap:10px;flex-wrap:wrap;justify-content:flex-end"},
+      const heldChip=held?chip("held","warn"):null;
+      if(heldChip)heldChip.classList.add("bk-held-chip");
+      right=h("div",{class:"rowflex",style:"gap:10px;flex-wrap:wrap;justify-content:flex-end"},heldChip,
         h("div",{class:"help mono",style:"text-align:right;white-space:nowrap"},when(data.refreshed),h("br"),data.parts+" parts · "+kb(data.bytes)),
         h("button",{class:"btn sm bk-restore-copy","data-where":where,onclick:async e=>{
           e.target.closest("button").disabled=true;
@@ -139,10 +152,11 @@ function copiesCard(st,repaintAll,autoRows){
           catch(err){toast(err.message,"err");}
           e.target.closest("button").disabled=false;}},ic("upload"),"Restore"));
     }
-    return h("div",{class:"bk-place","data-where":where,style:"display:grid;grid-template-columns:22px 1fr auto;gap:2px 12px;align-items:center;padding:9px 4px;border-top:1px solid var(--border)"},
+    return h("div",{class:"bk-place"+(held?" bk-held":""),"data-where":where,style:"display:grid;grid-template-columns:22px 1fr auto;gap:2px 12px;align-items:center;padding:9px 4px;border-top:1px solid var(--border)"},
       h("span",{class:"cico",style:"color:var(--text-3)"},ic(where==="sd"?"harddrive":"cpu")),words,right);
   }
   function paint(){
+    const c=cur();
     const sd=c.sd||{};
     const other=sd.device_id&&sd.device_id!==st.device_id;
     rows.replaceChildren(
@@ -202,7 +216,7 @@ function restorePreview(m,repaintAll){
       go.disabled=true;go.title="Unlock it first";return;
     }
     list.replaceChildren(...PARTS.map(p=>partRow(p,(m.parts||{})[p.id],picked,(id,on)=>{if(on)picked.add(id);else picked.delete(id);paint();},
-      {absentWhy:p.localOnly&&m.source==="file"?"Never in a file: restore them from a copy on the device":"Not in this backup"})));
+      {absentWhy:p.localOnly&&m.source==="file"?"Never in a file: restore them from a copy on the device":"Not in this backup",note:leftOut((m.left_out||{})[p.id],"This backup left out")})));
     errs.replaceChildren(...Object.entries(m.errors||{}).map(([k,v])=>banner("crit","alert",h("b",{},(PARTS.find(p=>p.id===k)||{title:k}).title+": "),v)));
     go.disabled=!!m.refused||picked.size===0;go.title=m.refused?"This backup cannot be restored":picked.size===0?"Tick at least one part":"";
   }
