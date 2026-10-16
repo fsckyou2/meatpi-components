@@ -368,6 +368,13 @@ cJSON *cb_manifest_to_json(const cb_manifest_t *m)
     cJSON_AddStringToObject(j, "fw_version", m->fw);
     cJSON_AddNumberToObject(j, "refreshed", (double)m->refreshed);
 
+    if (m->held)
+    {
+        /* the settings part as it was before a factory reset (issue #987) */
+        cJSON_AddBoolToObject(j, "held", true);
+        cJSON_AddNumberToObject(j, "held_since", (double)m->held_since);
+    }
+
     cJSON *parts = cJSON_AddObjectToObject(j, "parts");
 
     for (int p = 0; p < CB_PART_COUNT; p++)
@@ -387,6 +394,44 @@ cJSON *cb_manifest_to_json(const cb_manifest_t *m)
     }
 
     return j;
+}
+
+cJSON *cb_left_out_json(const cb_left_out_t *lo)
+{
+    if (lo == NULL || (lo->n == 0 && lo->more == 0))
+    {
+        return NULL;
+    }
+
+    cJSON *arr = cJSON_CreateArray();
+
+    if (arr == NULL)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < lo->n; i++)
+    {
+        cJSON *o = cJSON_CreateObject();
+
+        cJSON_AddStringToObject(o, "name", lo->items[i].name);
+        cJSON_AddStringToObject(o, "why",
+                                cb_why_str((cb_why_t)lo->items[i].why));
+        cJSON_AddItemToArray(arr, o);
+    }
+
+    if (lo->more > 0)
+    {
+        char   why[40];
+        cJSON *o = cJSON_CreateObject();
+
+        snprintf(why, sizeof(why), "and %u more", (unsigned)lo->more);
+        cJSON_AddStringToObject(o, "name", "");
+        cJSON_AddStringToObject(o, "why", why);
+        cJSON_AddItemToArray(arr, o);
+    }
+
+    return arr;
 }
 
 esp_err_t cb_manifest_from_json(const cJSON *j, cb_manifest_t *m)
@@ -413,6 +458,13 @@ esp_err_t cb_manifest_from_json(const cJSON *j, cb_manifest_t *m)
     snprintf(m->fw, sizeof(m->fw), "%s",
              cJSON_IsString(fw) ? fw->valuestring : "");
     m->refreshed = cJSON_IsNumber(ref) ? (int64_t)ref->valuedouble : 0;
+
+    const cJSON *held = cJSON_GetObjectItemCaseSensitive(j, "held");
+    const cJSON *since = cJSON_GetObjectItemCaseSensitive(j, "held_since");
+
+    m->held = cJSON_IsTrue(held);
+    m->held_since = (m->held && cJSON_IsNumber(since))
+                        ? (int64_t)since->valuedouble : 0;
 
     const cJSON *o = NULL;
 

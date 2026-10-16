@@ -69,6 +69,7 @@ static esp_err_t other_cb(const char *name, bool is_dir, size_t size, void *ctx)
 static void copy_status(cJSON *into, const cb_manifest_t *m, bool loaded)
 {
     bool present = loaded && cb_manifest_count(m) > 0;
+    bool held = present && m->held;
     char iso[CB_ISO_LEN];
 
     cb_iso_from_epoch(present ? m->refreshed : 0, iso);
@@ -77,6 +78,10 @@ static void copy_status(cJSON *into, const cb_manifest_t *m, bool loaded)
     cJSON_AddNumberToObject(into, "bytes", present ? cb_manifest_bytes(m) : 0);
     cJSON_AddNumberToObject(into, "parts", present ? cb_manifest_count(m) : 0);
     cJSON_AddStringToObject(into, "fw_version", present ? m->fw : "");
+    /* the settings part as it was before a factory reset (issue #987) */
+    cb_iso_from_epoch(held ? m->held_since : 0, iso);
+    cJSON_AddBoolToObject(into, "held", held);
+    cJSON_AddStringToObject(into, "held_since", iso);
 }
 
 void cb_copies_status(cJSON *into)

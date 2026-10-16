@@ -2,8 +2,9 @@
  * @file test_main.c
  * @brief Host tests for the pure core of config_backup: the member
  *        scanner, the redaction rule and its inverse, the name checks, the
- *        key-file codec, the manifest codec, the ISO time.
- *        Expected: "25 Tests 0 Failures 0 Ignored".
+ *        left-out list (issue #989), the key-file codec, the manifest codec
+ *        with the hold after a factory reset (issue #987), the ISO time.
+ *        Expected: "24 Tests 0 Failures 0 Ignored".
  */
 #include <string.h>
 
@@ -216,9 +217,17 @@ static void test_name_rules(void)
 {
     TEST_ASSERT_TRUE(cb_name_ok("hello.be", 8));
     TEST_ASSERT_TRUE(cb_name_ok("generic-codes_v2.csv", 20));
-    TEST_ASSERT_FALSE(cb_name_ok(".hidden", 7));
+    /* issue #989: the filesystem's own rule; a space, a leading dot and a
+       double quote are names the device holds, so the backup carries them */
+    TEST_ASSERT_TRUE(cb_name_ok("my car.dbc", 10));
+    TEST_ASSERT_TRUE(cb_name_ok(".hidden", 7));
+    TEST_ASSERT_TRUE(cb_name_ok("say \"hi\".be", 11));
+    TEST_ASSERT_FALSE(cb_name_ok(".", 1));
+    TEST_ASSERT_FALSE(cb_name_ok("..", 2));
     TEST_ASSERT_FALSE(cb_name_ok("a/b", 3));
-    TEST_ASSERT_FALSE(cb_name_ok("a b", 3));
+    TEST_ASSERT_FALSE(cb_name_ok("a\\b", 3));
+    TEST_ASSERT_FALSE(cb_name_ok("a\tb", 3));
+    TEST_ASSERT_FALSE(cb_name_ok("caf\xc3\xa9.dbc", 9));
     TEST_ASSERT_FALSE(cb_name_ok("", 0));
     TEST_ASSERT_FALSE(cb_name_ok(NULL, 1));
 
@@ -227,6 +236,67 @@ static void test_name_rules(void)
     memset(longname, 'a', sizeof(longname));
     TEST_ASSERT_FALSE(cb_name_ok(longname, CB_NAME_MAX));
     TEST_ASSERT_TRUE(cb_name_ok(longname, CB_NAME_MAX - 1));
+}
+
+/* ---- what a part leaves out (issue #989) ------------------------------------------------------ */
+
+static void test_left_out_list_keeps_names_then_counts(void)
+{
+    cb_left_out_t lo;
+
+    memset(&lo, 0, sizeof(lo));
+    TEST_ASSERT_NULL(cb_left_out_json(&lo)); /* nothing left out: no member */
+
+    cb_left_out_add(&lo, "big.dbc", 7, CB_WHY_SIZE);
+    cb_left_out_add(&lo, "caf\xc3\xa9.dbc", 9, CB_WHY_NAME);
+    cb_left_out_add(NULL, "sink", 4, CB_WHY_READ); /* a NULL list is a sink */
+    TEST_ASSERT_EQUAL_UINT(2, lo.n);
+    TEST_ASSERT_EQUAL_STRING("big.dbc", lo.items[0].name);
+    TEST_ASSERT_EQUAL_STRING("caf??.dbc", lo.items[1].name);
+    TEST_ASSERT_EQUAL_STRING("over 512 KB", cb_why_str(lo.items[0].why));
+    TEST_ASSERT_EQUAL_STRING("a name the backup cannot carry",
+                             cb_why_str(lo.items[1].why));
+
+    for (int i = 0; i < 10; i++)
+    {
+        char name[16];
+
+        snprintf(name, sizeof(name), "f%d.be", i);
+        cb_left_out_add(&lo, name, strlen(name), CB_WHY_COUNT);
+    }
+
+    TEST_ASSERT_EQUAL_UINT(CB_LEFT_MAX, lo.n);
+    TEST_ASSERT_EQUAL_UINT(4, lo.more);
+
+    cJSON *j = cb_left_out_json(&lo);
+
+    TEST_ASSERT_TRUE(cJSON_IsArray(j));
+    TEST_ASSERT_EQUAL_INT(CB_LEFT_MAX + 1, cJSON_GetArraySize(j));
+
+    const cJSON *first = cJSON_GetArrayItem(j, 0);
+    const cJSON *last = cJSON_GetArrayItem(j, CB_LEFT_MAX);
+
+    TEST_ASSERT_EQUAL_STRING("big.dbc", cJSON_GetObjectItem(first, "name")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("over 512 KB", cJSON_GetObjectItem(first, "why")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("", cJSON_GetObjectItem(last, "name")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("and 4 more", cJSON_GetObjectItem(last, "why")->valuestring);
+    cJSON_Delete(j);
+
+    /* a merge carries the names first, then the count */
+    cb_left_out_t dst;
+    cb_left_out_t src;
+
+    memset(&dst, 0, sizeof(dst));
+    memset(&src, 0, sizeof(src));
+    cb_left_out_add(&dst, "a.be", 4, CB_WHY_READ);
+    cb_left_out_add(&src, "b.be", 4, CB_WHY_JSON);
+    src.more = 3;
+    cb_left_out_merge(&dst, &src);
+    TEST_ASSERT_EQUAL_UINT(2, dst.n);
+    TEST_ASSERT_EQUAL_STRING("b.be", dst.items[1].name);
+    TEST_ASSERT_EQUAL_UINT(3, dst.more);
+    cb_left_out_merge(&dst, NULL);
+    TEST_ASSERT_EQUAL_UINT(2, dst.n);
 }
 
 static void test_set_and_vehicle_key_rules(void)
@@ -333,7 +403,52 @@ static void test_manifest_round_trip(void)
     TEST_ASSERT_TRUE(back.parts[CB_PART_CERTS].present);
     TEST_ASSERT_EQUAL_UINT32(9200, cb_manifest_bytes(&back));
     TEST_ASSERT_EQUAL_UINT(2, cb_manifest_count(&back));
+    TEST_ASSERT_FALSE(back.held); /* a manifest without the keys: not held */
+    TEST_ASSERT_EQUAL_INT64(0, back.held_since);
     cJSON_Delete(j);
+}
+
+static void test_manifest_hold_round_trip(void)
+{
+    /* issue #987: the settings part held since the boot after a factory
+       reset survives the manifest's trip through the file */
+    cb_manifest_t m;
+
+    memset(&m, 0, sizeof(m));
+    snprintf(m.device_id, sizeof(m.device_id), "68ee8f5a653d");
+    m.parts[CB_PART_SETTINGS].present = true;
+    m.parts[CB_PART_SETTINGS].bytes = 7100;
+    m.held = true;
+    m.held_since = 1792100000;
+
+    cJSON *j = cb_manifest_to_json(&m);
+
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItem(j, "held")));
+
+    cb_manifest_t back;
+
+    TEST_ASSERT_EQUAL(ESP_OK, cb_manifest_from_json(j, &back));
+    TEST_ASSERT_TRUE(back.held);
+    TEST_ASSERT_EQUAL_INT64(1792100000, back.held_since);
+    cJSON_Delete(j);
+
+    /* released: the keys go away with the flag */
+    m.held = false;
+    j = cb_manifest_to_json(&m);
+    TEST_ASSERT_NULL(cJSON_GetObjectItem(j, "held"));
+    TEST_ASSERT_NULL(cJSON_GetObjectItem(j, "held_since"));
+    TEST_ASSERT_EQUAL(ESP_OK, cb_manifest_from_json(j, &back));
+    TEST_ASSERT_FALSE(back.held);
+    cJSON_Delete(j);
+
+    /* `held` without a time: held, the time unknown */
+    cJSON *odd = cJSON_Parse("{\"wican_copy\":1,\"device_id\":\"x\",\"held\":true,"
+                             "\"parts\":{}}");
+
+    TEST_ASSERT_EQUAL(ESP_OK, cb_manifest_from_json(odd, &back));
+    TEST_ASSERT_TRUE(back.held);
+    TEST_ASSERT_EQUAL_INT64(0, back.held_since);
+    cJSON_Delete(odd);
 }
 
 static void test_manifest_rejects_other_versions_and_bad_entries(void)
@@ -394,18 +509,26 @@ static esp_err_t parts_cb(const cb_member_t *m, void *ctx)
 
 static void test_document_parts_index(void)
 {
+    /* the `left_out` member after `parts` (issue #989) is a top-level
+       member of its own: the parts index never sees it, an older firmware
+       never looks for it */
     const char *doc = "{\"wican_backup\":2,\"device_id\":\"68ee8f5a653d\",\"fw_version\":\"v6\","
                       "\"created\":\"2026-10-11T09:14:05Z\",\"redacted\":false,\"parts\":{"
                       "\"settings\":{\"wifi_manager\":{\"version\":1,\"data\":{}}},"
                       "\"vehicles\":{\"index\":{\"vehicles\":[]},\"tables\":{}},"
                       "\"databases\":{\"dtc_db\":[],\"dbc\":[{\"name\":\"a.dbc\",\"size\":0,\"b64\":\"\"}]},"
-                      "\"scripts\":[],\"dashboard\":null,\"extra\":1}}";
+                      "\"scripts\":[],\"dashboard\":null,\"extra\":1},"
+                      "\"left_out\":{\"databases\":[{\"name\":\"big.dbc\",\"why\":\"over 512 KB\"}]}}";
     cb_member_t parts;
+    cb_member_t left;
     parts_t     p = { 0 };
 
     TEST_ASSERT_TRUE(cb_json_find(doc, strlen(doc), "parts", &parts));
     TEST_ASSERT_EQUAL(ESP_OK, cb_json_members(parts.val, parts.val_len, parts_cb, &p));
     TEST_ASSERT_EQUAL_UINT32(CB_MASK_FILE, p.mask);
+    TEST_ASSERT_TRUE(cb_json_find(doc, strlen(doc), "left_out", &left));
+    TEST_ASSERT_TRUE(cb_json_valid(left.val, left.val_len));
+    TEST_ASSERT_FALSE(cb_json_find(parts.val, parts.val_len, "left_out", &left));
 }
 
 static void test_version_one_document(void)
@@ -454,12 +577,14 @@ void app_main(void)
     RUN_TEST(test_unredact_takes_stored_by_name_and_index);
     RUN_TEST(test_unredact_tolerates_missing_stored);
     RUN_TEST(test_name_rules);
+    RUN_TEST(test_left_out_list_keeps_names_then_counts);
     RUN_TEST(test_set_and_vehicle_key_rules);
     RUN_TEST(test_key_text_decodes_file_and_bare_hex);
     RUN_TEST(test_key_text_rejects_short_and_junk);
     RUN_TEST(test_hex_round_trip);
     RUN_TEST(test_crc32_vectors);
     RUN_TEST(test_manifest_round_trip);
+    RUN_TEST(test_manifest_hold_round_trip);
     RUN_TEST(test_manifest_rejects_other_versions_and_bad_entries);
     RUN_TEST(test_iso_time);
     RUN_TEST(test_document_parts_index);

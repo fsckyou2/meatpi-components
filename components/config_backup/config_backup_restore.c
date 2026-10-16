@@ -351,6 +351,16 @@ static esp_err_t finish_file(void)
 
         s_st.locked = false;
         s_st.bad_key = false;
+
+        /* the sealed document rules (issue #986): the wrapper of an
+           encrypted download carried no `redacted` until 2026-10-16, and
+           the inner header is the one the tag authenticates; without this
+           re-read a redacted file restored its blank secrets (or was
+           refused on the VPN key check) */
+        cb_member_t m;
+
+        s_st.redacted = cb_json_find(s_st.doc, s_st.doc_len, "redacted", &m) &&
+                        cb_json_bool(&m);
     }
 
     if (index_doc() != ESP_OK)
@@ -568,6 +578,25 @@ cJSON *cb_restore_manifest(void)
     cJSON_AddItemToObject(j, "errors",
                           s_st.errors ? cJSON_Duplicate(s_st.errors, true)
                                       : cJSON_CreateObject());
+
+    /* what the device that made it left out, per part (issue #989) */
+    cb_member_t lo;
+
+    if (s_st.doc != NULL &&
+        cb_json_find(s_st.doc, s_st.doc_len, "left_out", &lo))
+    {
+        cJSON *j_lo = cJSON_ParseWithLength(lo.val, lo.val_len);
+
+        if (cJSON_IsObject(j_lo))
+        {
+            cJSON_AddItemToObject(j, "left_out", j_lo);
+        }
+        else
+        {
+            cJSON_Delete(j_lo);
+        }
+    }
+
     return j;
 }
 
@@ -587,14 +616,20 @@ esp_err_t cb_restore_apply(uint32_t mask, bool keep_identity, bool keep_vpn,
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* the names (ap_ssid, hostname) are kept for a backup of ANOTHER device
+       only: a backup of this device carries its own names, and after a
+       factory reset the stored ones are the defaults (issue #987: the undo
+       must bring the access point name back) */
     cb_apply_opts_t o =
     {
-        .keep_identity = keep_identity,
+        .keep_identity = keep_identity &&
+                         strcmp(s_st.device_id, cb_device_id()) != 0,
         .keep_vpn = keep_vpn,
         .redacted = s_st.redacted,
     };
     cJSON *restored = cJSON_AddArrayToObject(resp, "restored");
     bool   any = false;
+    bool   settings_applied = false;
 
     for (int p = 0; p < CB_PART_COUNT; p++)
     {
@@ -614,12 +649,21 @@ esp_err_t cb_restore_apply(uint32_t mask, bool keep_identity, bool keep_vpn,
 
         cJSON_AddItemToArray(restored, cJSON_CreateString(CB_PART_NAMES[p]));
         any = true;
+        settings_applied = settings_applied || p == CB_PART_SETTINGS;
     }
 
     if (!any)
     {
         snprintf(err, err_len, "no part to restore");
         return ESP_ERR_NOT_FOUND;
+    }
+
+    if (settings_applied)
+    {
+        /* the user chose their settings: a copy held since a factory
+           reset follows the device again (issue #987); written before
+           the restart so the next boot's sweep sees it */
+        cb_copies_release();
     }
 
     ESP_LOGI(TAG, "restored from %s (%s): restarting", s_st.source,

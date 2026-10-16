@@ -44,13 +44,33 @@ marks the document `redacted`; on restore a blank secret keeps the stored
 value (the PUT rule), so such a file never wipes a password.
 
 Encrypted (`wican-<id>-<date>-encrypted.json`): `{"wican_backup":2,
-"encrypted":true,"device_id","fw_version","created","cipher":"aes-256-gcm",
-"nonce":<b64 12 bytes>,"data":<b64 ciphertext||tag>}` over the plain document,
-AAD `wican_backup:2:<device_id>:<created>`. Only the device that made it, or
-one given its key file, opens it.
+"encrypted":true,"redacted","device_id","fw_version","created",
+"cipher":"aes-256-gcm","nonce":<b64 12 bytes>,"data":<b64 ciphertext||tag>}`
+over the plain document, AAD `wican_backup:2:<device_id>:<created>`. Only the
+device that made it, or one given its key file, opens it. The sealed
+document's own `redacted` decides the restore (issue #986, 2026-10-16: the
+wrapper carried no such flag and the inner header was never re-read after
+the unseal, so an encrypted redacted file restored blank passwords, or was
+refused on the VPN key check; the restore re-reads it now and the wrapper
+carries it for the preview).
 
 Today's `GET /api/settings/backup` document (`wican_backup: 1`) still restores:
 it is the `settings` part alone.
+
+### Limits, and what is left out is said (issue #989, 2026-10-16)
+
+One file inside a part up to 512 KB (`CB_FILE_MAX`), 128 entries per folder
+(`CB_LIST_MAX`, 32 until this date), names up to 47 characters of printable
+ASCII without `/` or `\` (`cb_name_ok`: the filesystem's own segment rule; a
+space, a leading dot and a double quote are fine, the first cut refused them
+and `my car.dbc` vanished from every backup with nothing said), the whole
+document up to 2 MB. What a part leaves out is named with its reason: in the
+file (a top-level `left_out` object after `parts`), in `/api/backup/status`
+(`parts.<part>.left_out`, so the Backup card says it before any download), in
+the restore preview, and in the `backup` command's part lines. A file over
+the limit no longer fails the whole download with 500 nor stalls that part
+of the copies: it is listed and the rest goes in. The sweep logs these at
+DEBUG only (it reads every folder every two minutes).
 
 ## The copies
 
@@ -85,6 +105,23 @@ refuses a part whose file does not match its manifest's CRC. A manual refresh
 so its time moves. A card that comes back is re-read; a card written by
 another WiCAN (exactly one other `wican-<id>` folder) is offered for restore
 and needs that device's key file.
+
+**The copy after a factory reset (issue #987, 2026-10-16).** A factory reset
+wipes the settings partition only; the copy under `/data` survives it, and
+the first sweep used to overwrite the copy's settings part with the defaults
+20 s after the boot, before the user could reach the page that promised an
+undo. Now the worker asks `restart_tracker` whether this boot follows a
+planned `FACTORY_RESET`; if so, and the copy has a settings part, it marks
+the part `held` (`held` + `held_since` in the manifest, both copies when a
+card is in) before the first sweep, and a held settings part is never
+rewritten by a sweep, on this boot or the next ones. The hold ends when a
+settings part is restored from any source (`cb_copies_release()`, written
+before the restart so the next boot's sweep sees it) or when the copies are
+refreshed by hand (the refresh route, `backup -r`: the forced sweep clears
+the flags, the UI asks first). `keep_identity` never applies to this
+device's own backup, so the undo brings the access point name back. A
+second reset on a held copy keeps the older hold. The status route and the
+`backup` command report `held`.
 
 ## The key
 
@@ -143,12 +180,18 @@ api_http depends on this component for the touch.
 | `auto_copy` | true | keep the copies up to date (the sweeps); off = manual refresh only |
 | `cli` | true | register the `backup` console command |
 
-## Memory footprint (estimated, 2026-10-11)
+## Memory footprint (estimated, 2026-10-11; the 2026-10-16 changes add
+nothing to internal RAM)
 
 - Internal RAM: three static FreeRTOS objects, the 32-byte key, about
   0.5 KB of state (the worker's 8 KB stack sat here until 2026-10-13: it
   was the largest single item of the internal RAM lost between the alfa-01
-  and alfa-04 builds, 8.8 KB of the 11.6 KB of static growth).
+  and alfa-04 builds, 8.8 KB of the 11.6 KB of static growth). The hold and
+  the left-out lists (2026-10-16) keep every new byte in PSRAM: the two
+  manifests grew by 16 B each in `.ext_ram.bss`, the directory list
+  (`cb_dir_t`, a PSRAM alloc per read) is about 7 KB with the 128-entry cap
+  and its left-out list, the document builder allocates one 400 B list per
+  part in PSRAM for the time of a download, the status route one.
 - PSRAM: the worker's 8 KB stack, the two manifests (about 0.5 KB), the
   staged restore slot header;
   during a sweep one part at a time (the plain part, its sealed twin: twice
@@ -164,12 +207,12 @@ api_http depends on this component for the touch.
 | File | Role |
 |---|---|
 | `config_backup.c` | lifecycle, the touch, the clock and identity helpers, the planned restart after a restore |
-| `config_backup_core.c` | PURE: the part names, the top-level JSON member scanner (ranges, no parse of the big strings), the name checks, the ISO time |
-| `config_backup_codec.c` | PURE: the redaction rule and its inverse, the key-file codec, the manifest codec |
+| `config_backup_core.c` | PURE: the part names, the top-level JSON member scanner (ranges, no parse of the big strings), the name checks, the left-out list, the ISO time |
+| `config_backup_codec.c` | PURE: the redaction rule and its inverse, the key-file codec, the manifest codec (with the hold), the left-out list as JSON |
 | `config_backup_crypto.c` | the key in NVS, AES-256-GCM and HMAC through the PSA API, base64 |
-| `config_backup_files.c` | the growable PSRAM buffer, files into PSRAM, a directory into a list, JSON files verbatim, files as base64, a directory wipe |
-| `config_backup_doc.c` | the six part builders, the whole document, the counts of the status route |
-| `config_backup_copies.c` | the copies worker and its sweep, the manifests (with the CRC of each sealed file, verified at the first sweep of a boot), the folders |
+| `config_backup_files.c` | the growable PSRAM buffer, files into PSRAM, a directory into a list (what it cannot take recorded), JSON files verbatim, files as base64 (an oversize file listed, not fatal), a directory wipe |
+| `config_backup_doc.c` | the six part builders, the whole document with its `left_out` member, the counts and left-out lists of the status route |
+| `config_backup_copies.c` | the copies worker and its sweep, the manifests (with the CRC of each sealed file, verified at the first sweep of a boot), the folders, the hold after a factory reset and its release |
 | `config_backup_copies_read.c` | the status route's view of the copies, the folder a restore reads from, a copy loaded for a restore (each part checked against the manifest's CRC) |
 | `config_backup_restore.c` | the staged slot, the header, the unseal, the index, the dry run, the manifest, the apply |
 | `config_backup_apply.c` | one part at a time: the dry run and the apply with the keep rules |
@@ -179,11 +222,16 @@ api_http depends on this component for the touch.
 
 ## Testing
 
-- Host: `host_test/` (22 tests: the CRC-32 vectors, the scanner, the redaction rule and its
-  inverse, the names, the key file, the manifest, a document indexed, a
-  version-1 document, a 64 KB string skipped). `filesystem/host_test` covers
+- Host: `host_test/` (24 tests: the CRC-32 vectors, the scanner, the redaction rule and its
+  inverse, the names, the left-out list, the key file, the manifest and its
+  hold, a document indexed with its `left_out` member, a version-1 document,
+  a 64 KB string skipped). `filesystem/host_test` covers
   `filesystem_api_hidden`.
-- Mock: `tools/webui_preview/probe_backup.mjs` (`BACKUP PROBE PASS`, 44
-  checks, plain and `--min`).
+- Mock: `tools/webui_preview/probe_backup.mjs` (`BACKUP PROBE PASS`, 64
+  checks, plain and `--min`; the third boot covers the held copy and the
+  left-out notes).
 - Hardware: `tools/testbench/system/config_backup_bench.py`
-  (`CONFIG BACKUP PASS`; the row in TESTING.md).
+  (`CONFIG BACKUP PASS`; the row in TESTING.md; legs b7 and b8 for issues
+  #986 and #989 and the opt-in b9 `--factory --reset-dut` for #987, all
+  green on the bench DUT on 2026-10-16: the hold set after a real factory
+  reset, the settings restored from the held copy, the hold released).

@@ -375,7 +375,17 @@ long cb_json_long(const cb_member_t *m)
 
 bool cb_name_ok(const char *name, size_t len)
 {
-    if (name == NULL || len == 0 || len >= CB_NAME_MAX || name[0] == '.')
+    /* the filesystem's own segment rule (filesystem_path.c). Until issue
+       #989 (2026-10-16) this refused a space, a leading dot and the double
+       quote, so a legitimate "my car.dbc" vanished from every backup with
+       nothing said; the JSON escaper carries any printable character. */
+    if (name == NULL || len == 0 || len >= CB_NAME_MAX)
+    {
+        return false;
+    }
+
+    if ((len == 1 && name[0] == '.') ||
+        (len == 2 && name[0] == '.' && name[1] == '.'))
     {
         return false;
     }
@@ -384,13 +394,88 @@ bool cb_name_ok(const char *name, size_t len)
     {
         char c = name[i];
 
-        if (c < 0x21 || c > 0x7e || c == '/' || c == '\\' || c == '"')
+        if (c < 0x20 || c > 0x7e || c == '/' || c == '\\')
         {
             return false;
         }
     }
 
     return true;
+}
+
+/* ---- what a part leaves out ------------------------------------------------------- */
+
+void cb_left_out_add(cb_left_out_t *lo, const char *name, size_t len,
+                     cb_why_t why)
+{
+    if (lo == NULL)
+    {
+        return;
+    }
+
+    if (lo->n >= CB_LEFT_MAX)
+    {
+        lo->more++;
+        return;
+    }
+
+    cb_left_item_t *it = &lo->items[lo->n++];
+
+    if (name == NULL)
+    {
+        len = 0;
+    }
+
+    if (len >= sizeof(it->name))
+    {
+        len = sizeof(it->name) - 1;
+    }
+
+    /* a name the rule refused may hold anything: the printable part only */
+    size_t o = 0;
+
+    for (size_t i = 0; i < len; i++)
+    {
+        unsigned char c = (unsigned char)name[i];
+
+        it->name[o++] = (c < 0x20 || c > 0x7e) ? '?' : (char)c;
+    }
+
+    it->name[o] = '\0';
+    it->why = (uint8_t)why;
+}
+
+void cb_left_out_merge(cb_left_out_t *dst, const cb_left_out_t *src)
+{
+    if (dst == NULL || src == NULL)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < src->n; i++)
+    {
+        cb_left_out_add(dst, src->items[i].name, strlen(src->items[i].name),
+                        (cb_why_t)src->items[i].why);
+    }
+
+    dst->more += src->more;
+}
+
+/* the words carry the limits: a change of either macro lands here */
+_Static_assert(CB_FILE_MAX == 512u * 1024u, "cb_why_str names the size limit");
+_Static_assert(CB_LIST_MAX == 128, "cb_why_str names the folder cap");
+
+const char *cb_why_str(cb_why_t why)
+{
+    switch (why)
+    {
+        case CB_WHY_NAME:  return "a name the backup cannot carry";
+        case CB_WHY_SIZE:  return "over 512 KB";
+        case CB_WHY_COUNT: return "more than 128 files in its folder";
+        case CB_WHY_READ:  return "could not be read";
+        case CB_WHY_JSON:  return "not valid JSON";
+        default:           return "left out";
+    }
 }
 
 bool cb_set_name_ok(const char *name, size_t len)

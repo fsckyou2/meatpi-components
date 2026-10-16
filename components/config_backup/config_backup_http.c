@@ -363,12 +363,14 @@ static esp_err_t download_handler(httpd_req_t *req)
     char head[256];
 
     (void)cb_b64_encode(nonce, CB_NONCE_LEN, nonce_b64, sizeof(nonce_b64), NULL);
+    /* `redacted` rides the wrapper too (issue #986) so the preview can say
+       so before the unlock; the sealed document's own flag rules */
     snprintf(head, sizeof(head),
-             "{\"wican_backup\":%u,\"encrypted\":true,\"device_id\":\"%s\","
-             "\"fw_version\":\"%s\",\"created\":\"%s\","
+             "{\"wican_backup\":%u,\"encrypted\":true,\"redacted\":%s,"
+             "\"device_id\":\"%s\",\"fw_version\":\"%s\",\"created\":\"%s\","
              "\"cipher\":\"aes-256-gcm\",\"nonce\":\"%s\",\"data\":\"",
-             CB_DOC_VERSION, cb_device_id(), cb_fw_version(), doc_created,
-             nonce_b64);
+             CB_DOC_VERSION, redact ? "true" : "false", cb_device_id(),
+             cb_fw_version(), doc_created, nonce_b64);
     err = httpd_resp_send_chunk(req, head, strlen(head));
 
     if (err == ESP_OK)

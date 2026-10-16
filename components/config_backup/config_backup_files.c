@@ -220,19 +220,33 @@ esp_err_t cb_read_file(const char *path, char **out, size_t *out_len,
     return ESP_OK;
 }
 
-/* runs under the fs lock: collect only, no fs call */
+/* runs under the fs lock: collect only, no fs call. What the list cannot
+   take is recorded, not dropped (issue #989: a name with a space or the
+   33rd file vanished from every backup with nothing said). */
 static esp_err_t list_cb(const char *name, bool is_dir, size_t size, void *ctx)
 {
     cb_dir_t *d = ctx;
+    size_t    len = strlen(name);
 
-    if (!cb_name_ok(name, strlen(name)))
+    if (!cb_name_ok(name, len))
     {
+        if (!is_dir)
+        {
+            cb_left_out_add(&d->left, name, len, CB_WHY_NAME);
+        }
+
         return ESP_OK;
     }
 
     if (d->n >= CB_LIST_MAX)
     {
         d->overflow = true;
+
+        if (!is_dir)
+        {
+            cb_left_out_add(&d->left, name, len, CB_WHY_COUNT);
+        }
+
         return ESP_OK;
     }
 
@@ -262,7 +276,9 @@ cb_dir_t *cb_dir_read(const char *path)
 
     if (d->overflow)
     {
-        ESP_LOGW(TAG, "%s: more than %d entries, the rest is not backed up",
+        /* the sweep reads every folder every two minutes: the status route
+           and the document carry the fact, the log only at DEBUG */
+        ESP_LOGD(TAG, "%s: more than %d entries, the rest is not backed up",
                  path, CB_LIST_MAX);
     }
 
@@ -279,6 +295,13 @@ esp_err_t cb_wipe_dir_files(const char *dir)
     }
 
     esp_err_t err = ESP_OK;
+
+    if (d->overflow)
+    {
+        /* a restore (a user action): what the list could not take stays */
+        ESP_LOGW(TAG, "%s: more than %d entries, the rest is not cleared",
+                 dir, CB_LIST_MAX);
+    }
 
     for (size_t i = 0; i < d->n && err == ESP_OK; i++)
     {
@@ -297,14 +320,15 @@ esp_err_t cb_wipe_dir_files(const char *dir)
     return err;
 }
 
-bool cb_append_json_file(cb_buf_t *b, const char *path)
+esp_err_t cb_append_json_file(cb_buf_t *b, const char *path)
 {
-    char  *buf = NULL;
-    size_t len = 0;
+    char     *buf = NULL;
+    size_t    len = 0;
+    esp_err_t err = cb_read_file(path, &buf, &len, CB_FILE_MAX);
 
-    if (cb_read_file(path, &buf, &len, CB_FILE_MAX) != ESP_OK)
+    if (err != ESP_OK)
     {
-        return false;
+        return (err == ESP_ERR_INVALID_SIZE) ? err : ESP_ERR_NOT_FOUND;
     }
 
     bool ok = cb_json_valid(buf, len);
@@ -327,15 +351,17 @@ bool cb_append_json_file(cb_buf_t *b, const char *path)
             e--;
         }
 
-        ok = cb_buf_append(b, buf + s, e - s) == ESP_OK;
+        err = cb_buf_append(b, buf + s, e - s);
     }
     else
     {
-        ESP_LOGW(TAG, "%s is not JSON: left out", path);
+        /* the caller lists it (issue #989); every sweep would log this */
+        ESP_LOGD(TAG, "%s is not JSON: left out", path);
+        err = ESP_ERR_INVALID_RESPONSE;
     }
 
     free(buf);
-    return ok;
+    return err;
 }
 
 esp_err_t cb_append_file_b64(cb_buf_t *b, const char *dir, const char *name,
@@ -347,7 +373,7 @@ esp_err_t cb_append_file_b64(cb_buf_t *b, const char *dir, const char *name,
 
     if (size > CB_FILE_MAX)
     {
-        ESP_LOGW(TAG, "%s: %u bytes is over the limit, left out", path,
+        ESP_LOGD(TAG, "%s: %u bytes is over the limit, left out", path,
                  (unsigned)size);
         return ESP_ERR_INVALID_SIZE;
     }
@@ -411,7 +437,7 @@ esp_err_t cb_append_file_b64(cb_buf_t *b, const char *dir, const char *name,
     return err;
 }
 
-esp_err_t cb_append_dir_b64(cb_buf_t *b, const char *dir)
+esp_err_t cb_append_dir_b64(cb_buf_t *b, const char *dir, cb_left_out_t *left)
 {
     cb_dir_t *d = cb_dir_read(dir);
 
@@ -425,10 +451,22 @@ esp_err_t cb_append_dir_b64(cb_buf_t *b, const char *dir)
 
     for (size_t i = 0; i < d->n && err == ESP_OK; i++)
     {
+        size_t nlen = strlen(d->names[i]);
+
         if (d->dirs[i])
         {
             continue;
         }
+
+        if (d->sizes[i] > CB_FILE_MAX)
+        {
+            /* listed, not fatal (issue #989: one big file used to fail the
+               whole download and stall that part of the copies) */
+            cb_left_out_add(left, d->names[i], nlen, CB_WHY_SIZE);
+            continue;
+        }
+
+        size_t mark = b->len;
 
         if (!first)
         {
@@ -440,9 +478,23 @@ esp_err_t cb_append_dir_b64(cb_buf_t *b, const char *dir)
             err = cb_append_file_b64(b, dir, d->names[i], d->sizes[i]);
         }
 
+        if (err != ESP_OK && err != ESP_ERR_NO_MEM && !b->failed)
+        {
+            /* gone or grown between the listing and the read: the entry
+               rolled back, the file listed, the document goes on */
+            b->len = mark;
+            b->data[mark] = '\0';
+            cb_left_out_add(left, d->names[i], nlen,
+                            err == ESP_ERR_INVALID_SIZE ? CB_WHY_SIZE
+                                                        : CB_WHY_READ);
+            err = ESP_OK;
+            continue;
+        }
+
         first = false;
     }
 
+    cb_left_out_merge(left, &d->left);
     free(d);
 
     if (err == ESP_OK)

@@ -68,7 +68,9 @@ extern const char *const CB_PART_NAMES[CB_PART_COUNT];
 #define CB_FILE_MAX       (512u * 1024u)       /* one file inside a part */
 #define CB_PEM_MAX        8192u                /* one certificate part */
 #define CB_NAME_MAX       48                   /* a file or set name + NUL */
-#define CB_LIST_MAX       32                   /* entries read from one dir */
+#define CB_LIST_MAX       128                  /* entries read from one dir
+                                                  (32 until issue #989; the
+                                                  list lives in PSRAM) */
 #define CB_ID_LEN         16                   /* device id + NUL */
 #define CB_FW_LEN         32
 #define CB_ISO_LEN        24
@@ -87,6 +89,35 @@ extern const char *const CB_PART_NAMES[CB_PART_COUNT];
 #define CB_SWEEP_PERIOD_MS  120000
 #define CB_STAGE_LIFE_S     600
 #define CB_REFRESH_WAIT_MS  30000
+
+/* ---- what a part leaves out, and why (issue #989) ---------------------------------- */
+
+/* Listed in the document (`left_out`), the status route and the UI instead
+ * of a log line nobody reads: a file over the size limit, a name the backup
+ * cannot carry, a folder beyond the list cap, a file gone or torn. */
+typedef enum
+{
+    CB_WHY_NAME = 0, /* over CB_NAME_MAX, or not printable ASCII */
+    CB_WHY_SIZE,     /* over CB_FILE_MAX */
+    CB_WHY_COUNT,    /* beyond CB_LIST_MAX entries in its folder */
+    CB_WHY_READ,     /* unreadable, or gone between the listing and the read */
+    CB_WHY_JSON,     /* a JSON file that is not valid JSON */
+} cb_why_t;
+
+#define CB_LEFT_MAX 8 /* names kept per part; beyond that only a count */
+
+typedef struct
+{
+    char    name[CB_NAME_MAX];
+    uint8_t why;
+} cb_left_item_t;
+
+typedef struct
+{
+    cb_left_item_t items[CB_LEFT_MAX];
+    size_t         n;
+    size_t         more; /* left out beyond the names kept */
+} cb_left_out_t;
 
 /* ---- a growable PSRAM buffer and the file helpers (config_backup_files.c) --------- */
 
@@ -110,11 +141,12 @@ esp_err_t cb_json_string_append(cb_buf_t *b, const char *s, size_t n);
  *  runs under the fs lock and only collects. Caller frees. */
 typedef struct
 {
-    char   names[CB_LIST_MAX][CB_NAME_MAX];
-    size_t sizes[CB_LIST_MAX];
-    bool   dirs[CB_LIST_MAX];
-    size_t n;
-    bool   overflow;
+    char          names[CB_LIST_MAX][CB_NAME_MAX];
+    size_t        sizes[CB_LIST_MAX];
+    bool          dirs[CB_LIST_MAX];
+    size_t        n;
+    bool          overflow;
+    cb_left_out_t left; /* the names refused and the entries past the cap */
 } cb_dir_t;
 
 cb_dir_t *cb_dir_read(const char *path);
@@ -123,13 +155,17 @@ esp_err_t cb_read_file(const char *path, char **out, size_t *out_len,
                        size_t cap);
 /** Delete every file directly inside @p dir (not the dir itself). */
 esp_err_t cb_wipe_dir_files(const char *dir);
-/** A JSON file appended verbatim (trimmed); false when absent or not JSON. */
-bool      cb_append_json_file(cb_buf_t *b, const char *path);
+/** A JSON file appended verbatim (trimmed). ESP_ERR_NOT_FOUND when absent
+ *  or unreadable, ESP_ERR_INVALID_SIZE when over CB_FILE_MAX,
+ *  ESP_ERR_INVALID_RESPONSE when not JSON; a failure of the buffer itself
+ *  comes with @p b->failed set. */
+esp_err_t cb_append_json_file(cb_buf_t *b, const char *path);
 /** {"name","size","b64"} for one file, read in blocks. */
 esp_err_t cb_append_file_b64(cb_buf_t *b, const char *dir, const char *name,
                              size_t size);
-/** [ {file}, ... ] for every file of a dir. */
-esp_err_t cb_append_dir_b64(cb_buf_t *b, const char *dir);
+/** [ {file}, ... ] for every file of a dir that fits; what does not goes
+ *  into @p left (NULL = a sink) instead of failing the document. */
+esp_err_t cb_append_dir_b64(cb_buf_t *b, const char *dir, cb_left_out_t *left);
 
 /* ---- the pure core (config_backup_core.c + config_backup_codec.c, host-tested) ----- */
 
@@ -181,9 +217,19 @@ void cb_redact_settings(cJSON *settings_part);
 /** A blank secret in @p data takes the value @p stored has (the PUT rule). */
 void cb_unredact(cJSON *data, const cJSON *stored, const char *component);
 
-/** File and set names that may be written back: no separators, no leading
- *  dot, printable ASCII, under CB_NAME_MAX. */
+/** File names that may be carried and written back: the filesystem's own
+ *  segment rule (printable ASCII, no `/` or `\`, not "." or "..") under
+ *  CB_NAME_MAX. Spaces and a leading dot are fine (issue #989). */
 bool cb_name_ok(const char *name, size_t len);
+
+/** Record one more left-out entry (a NULL list is a sink); past CB_LEFT_MAX
+ *  names only the count grows. Unprintable bytes of the name become '?'. */
+void cb_left_out_add(cb_left_out_t *lo, const char *name, size_t len,
+                     cb_why_t why);
+/** Everything of @p src into @p dst (names first, then the count). */
+void cb_left_out_merge(cb_left_out_t *dst, const cb_left_out_t *src);
+/** The reason as the UI shows it. */
+const char *cb_why_str(cb_why_t why);
 
 /** A certificate set name: [a-z0-9_-]{1,24} (cert_manager's rule). */
 bool cb_set_name_ok(const char *name, size_t len);
@@ -220,11 +266,20 @@ typedef struct
     char               device_id[CB_ID_LEN];
     char               fw[CB_FW_LEN];
     int64_t            refreshed; /* epoch, 0 = clock unknown */
+    bool               held;      /* the settings part stays as it was before
+                                     a factory reset until a restore of a
+                                     settings part or a manual refresh lets
+                                     it go (issue #987) */
+    int64_t            held_since; /* epoch of the boot after that reset,
+                                      0 = clock unknown */
     cb_manifest_part_t parts[CB_PART_COUNT];
 } cb_manifest_t;
 
 cJSON    *cb_manifest_to_json(const cb_manifest_t *m);
 esp_err_t cb_manifest_from_json(const cJSON *j, cb_manifest_t *m);
+/** [{"name","why"}, ...] plus a final {"name":"","why":"and N more"} when
+ *  the names ran out; NULL when nothing was left out. */
+cJSON    *cb_left_out_json(const cb_left_out_t *lo);
 uint32_t  cb_manifest_bytes(const cb_manifest_t *m);
 unsigned  cb_manifest_count(const cb_manifest_t *m);
 
@@ -262,11 +317,15 @@ esp_err_t cb_b64_decode(const char *in, size_t n, uint8_t *out,
 /* ---- the document (config_backup_doc.c) -------------------------------------------- */
 
 /** Append the JSON VALUE of one part (no key). ESP_OK with an empty
- *  collection when there is nothing on the device. */
-esp_err_t cb_doc_part(cb_part_t part, bool redact, cb_buf_t *out);
-/** The whole plain document for the parts in @p mask. */
+ *  collection when there is nothing on the device. What the part leaves
+ *  out is listed in @p left (NULL = a sink). */
+esp_err_t cb_doc_part(cb_part_t part, bool redact, cb_buf_t *out,
+                      cb_left_out_t *left);
+/** The whole plain document for the parts in @p mask, with a top-level
+ *  `left_out` object when a part left something out. */
 esp_err_t cb_doc_build(uint32_t mask, bool redact, cb_buf_t *out);
-/** Counts and bytes of one part, as the status route reports them. */
+/** Counts and bytes of one part, as the status route reports them, plus
+ *  `left_out` when the listing shows something the part would skip. */
 esp_err_t cb_doc_part_status(cb_part_t part, cJSON *into);
 
 /* ---- the copies (config_backup_copies.c, config_backup_copies_read.c) ------------- */
@@ -274,8 +333,13 @@ esp_err_t cb_doc_part_status(cb_part_t part, cJSON *into);
 esp_err_t cb_copies_start(void);
 void      cb_copies_stop(void);
 void      cb_copies_touch(void);
-/** Refresh both copies now; waits up to @p wait_ms. */
+/** Refresh both copies now; waits up to @p wait_ms. A held settings part
+ *  (issue #987) is let go: the user asked for the copies to follow. */
 esp_err_t cb_copies_refresh(uint32_t wait_ms, cJSON *written);
+/** Let a held settings part follow the device again at once (a restore of
+ *  a settings part): both manifests are rewritten before the caller's
+ *  restart. */
+void      cb_copies_release(void);
 void      cb_copies_status(cJSON *into);
 /** The folder of the copy to restore from: "internal", or "sd" (our own
  *  folder, else the one other device's folder on the card). */

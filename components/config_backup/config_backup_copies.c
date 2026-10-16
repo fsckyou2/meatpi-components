@@ -33,6 +33,15 @@
  *        even when no part changed, so its time moves. The read side (the
  *        status, the restore source, the copy loader) lives in
  *        config_backup_copies_read.c since 2026-10-13.
+ *
+ *        The copy after a factory reset (issue #987, 2026-10-16): the reset
+ *        wipes the settings partition only, the copy under /data survives
+ *        it, and the first sweep used to overwrite the copy's settings part
+ *        with the defaults 20 s after the boot, before the user could see
+ *        the page that promised an undo. The boot after a planned factory
+ *        reset marks the settings part HELD in both manifests; a held part
+ *        is never rewritten by a sweep. A restore of a settings part (the
+ *        user chose) or a manual refresh (the user let go) releases it.
  */
 #include <stdio.h>
 #include <string.h>
@@ -47,6 +56,7 @@
 
 #include "dev_status_manager.h"
 #include "filesystem.h"
+#include "restart_tracker.h"
 
 #include "config_backup_private.h"
 
@@ -218,17 +228,9 @@ static void verify_parts(const char *dir, cb_manifest_t *m)
     }
 }
 
-static void sweep(bool force)
+/* the manifests, read and verified once per boot (under the lock) */
+static void load_manifests(bool sd, const char *sd_dir)
 {
-    char  sd_dir[80];
-    bool  sd = dev_status_manager_is_set(DEV_STATUS_BIT_SDCARD_MOUNTED);
-    bool  wrote_int = false;
-    bool  wrote_sd = false;
-    const char *dev = cb_device_id();
-
-    sd_dir_own(sd_dir, sizeof(sd_dir));
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-
     if (!s_mf_int.loaded)
     {
         (void)cb_copies_read_manifest(CB_DIR_INTERNAL, &s_mf_int);
@@ -245,6 +247,117 @@ static void sweep(bool force)
     {
         s_mf_sd.loaded = false; /* a card that comes back is re-read */
     }
+}
+
+/* ---- the hold after a factory reset (issue #987) ------------------------------------- */
+
+static bool boot_follows_factory_reset(void)
+{
+    restart_tracker_record_t r;
+
+    return restart_tracker_get_latest_record(&r) == ESP_OK && r.was_planned &&
+           r.planned_reason == RESTART_TRACKER_PLANNED_REASON_FACTORY_RESET;
+}
+
+/* before the first sweep of the boot after a factory reset: a copy with a
+ * settings part keeps it (both manifests say so, so the hold survives the
+ * next boots); a second reset on a held copy keeps the older hold */
+static void hold_after_factory_reset(void)
+{
+    char    sd_dir[80];
+    bool    sd = dev_status_manager_is_set(DEV_STATUS_BIT_SDCARD_MOUNTED);
+    int64_t now = cb_now_epoch();
+    bool    held = false;
+
+    sd_dir_own(sd_dir, sizeof(sd_dir));
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    load_manifests(sd, sd_dir);
+
+    if (s_mf_int.parts[CB_PART_SETTINGS].present && !s_mf_int.held)
+    {
+        s_mf_int.held = true;
+        s_mf_int.held_since = now;
+        (void)write_manifest(CB_DIR_INTERNAL, &s_mf_int);
+        held = true;
+    }
+
+    if (sd && s_mf_sd.parts[CB_PART_SETTINGS].present && !s_mf_sd.held)
+    {
+        s_mf_sd.held = true;
+        s_mf_sd.held_since = now;
+        (void)write_manifest(sd_dir, &s_mf_sd);
+        held = true;
+    }
+
+    xSemaphoreGive(s_lock);
+
+    if (held)
+    {
+        ESP_LOGI(TAG, "copies: the settings from before the factory reset are "
+                 "held (restore them to undo it; a refresh lets them go)");
+    }
+}
+
+void cb_copies_release(void)
+{
+    if (s_lock == NULL)
+    {
+        return;
+    }
+
+    char sd_dir[80];
+    bool sd = dev_status_manager_is_set(DEV_STATUS_BIT_SDCARD_MOUNTED);
+    bool released = false;
+
+    sd_dir_own(sd_dir, sizeof(sd_dir));
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    load_manifests(sd, sd_dir); /* a restore within the boot delay */
+
+    if (s_mf_int.held)
+    {
+        s_mf_int.held = false;
+        s_mf_int.held_since = 0;
+        (void)write_manifest(CB_DIR_INTERNAL, &s_mf_int);
+        released = true;
+    }
+
+    if (sd && s_mf_sd.held)
+    {
+        s_mf_sd.held = false;
+        s_mf_sd.held_since = 0;
+        (void)write_manifest(sd_dir, &s_mf_sd);
+        released = true;
+    }
+
+    xSemaphoreGive(s_lock);
+
+    if (released)
+    {
+        ESP_LOGI(TAG, "copies: the held settings part follows the device again");
+    }
+}
+
+static void sweep(bool force)
+{
+    char  sd_dir[80];
+    bool  sd = dev_status_manager_is_set(DEV_STATUS_BIT_SDCARD_MOUNTED);
+    bool  wrote_int = false;
+    bool  wrote_sd = false;
+    const char *dev = cb_device_id();
+
+    sd_dir_own(sd_dir, sizeof(sd_dir));
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    load_manifests(sd, sd_dir);
+
+    if (force)
+    {
+        /* a manual refresh lets a held settings part go (issue #987); the
+           manifests are written below in any case */
+        s_mf_int.held = false;
+        s_mf_int.held_since = 0;
+        s_mf_sd.held = false;
+        s_mf_sd.held_since = 0;
+    }
 
     cb_buf_t plain;
 
@@ -260,7 +373,7 @@ static void sweep(bool force)
         plain.len = 0;
         plain.data[0] = '\0';
 
-        if (cb_doc_part((cb_part_t)p, false, &plain) != ESP_OK)
+        if (cb_doc_part((cb_part_t)p, false, &plain, NULL) != ESP_OK)
         {
             ESP_LOGW(TAG, "copies: part %s could not be built", CB_PART_NAMES[p]);
             continue;
@@ -278,6 +391,13 @@ static void sweep(bool force)
         bool need_sd = sd && (!s_mf_sd.parts[p].present ||
                               memcmp(mac, s_mf_sd.parts[p].hmac,
                                      CB_HMAC_LEN) != 0);
+
+        if (p == CB_PART_SETTINGS)
+        {
+            /* a held settings part stays as it was (issue #987) */
+            need_int = need_int && !s_mf_int.held;
+            need_sd = need_sd && !s_mf_sd.held;
+        }
 
         if (!need_int && !need_sd)
         {
@@ -369,6 +489,11 @@ static void worker(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(CB_BOOT_DELAY_MS));
+
+    if (boot_follows_factory_reset())
+    {
+        hold_after_factory_reset(); /* before the first sweep */
+    }
 
     while (!s_stop)
     {

@@ -65,6 +65,21 @@ static void print_copy(const char *label, const cJSON *c)
                    cJSON_IsNumber(bytes) ? (unsigned)bytes->valuedouble : 0u,
                    (cJSON_IsString(ref) && ref->valuestring[0])
                        ? ref->valuestring : "(clock unknown)");
+
+    const cJSON *held = cJSON_GetObjectItemCaseSensitive(c, "held");
+    const cJSON *since = cJSON_GetObjectItemCaseSensitive(c, "held_since");
+
+    if (cJSON_IsTrue(held))
+    {
+        /* issue #987: the settings part as it was before the factory reset */
+        cmdline_printf("    holds the settings from before the factory reset"
+                       "%s%s (restore them to undo it; -r lets the copy "
+                       "follow the device again)\n",
+                       (cJSON_IsString(since) && since->valuestring[0])
+                           ? " of " : "",
+                       (cJSON_IsString(since) && since->valuestring[0])
+                           ? since->valuestring : "");
+    }
 }
 
 static int cmd_backup(int argc, char **argv)
@@ -118,9 +133,16 @@ static int cmd_backup(int argc, char **argv)
         {
             const cJSON *bytes = cJSON_GetObjectItemCaseSensitive(o, "bytes");
 
-            cmdline_printf("  part %-10s %u bytes\n", CB_PART_NAMES[p],
+            const cJSON *lo = cJSON_GetObjectItemCaseSensitive(o, "left_out");
+            int          left = cJSON_IsArray(lo) ? cJSON_GetArraySize(lo) : 0;
+
+            /* issue #989: what the part leaves out, counted here, named by
+               the status route and the UI */
+            cmdline_printf("  part %-10s %u bytes%s%d%s\n", CB_PART_NAMES[p],
                            cJSON_IsNumber(bytes) ? (unsigned)bytes->valuedouble
-                                                 : 0u);
+                                                 : 0u,
+                           left > 0 ? ", " : "", left,
+                           left > 0 ? " left out" : "");
         }
 
         cJSON_Delete(o);
