@@ -199,15 +199,16 @@ static cJSON *build_status(void)
                             obd_chip_status_ok() ? "ready" : "offline");
 
     /* vpn_ip is HA's away-from-home control endpoint (it registers the
-       tunnel address as the backup for /api/webhook + buttons) */
+       tunnel address as the backup for /api/webhook + buttons).
+       vpn_status takes vpn_manager's own words (issue #985: a 4-entry
+       table here read past its end once PAUSED joined the enum, so
+       `connected` pushed garbage and `paused` read "connecting"). */
     vpn_manager_status_t vs;
 
     if (vpn_manager_status(&vs) == ESP_OK)
     {
-        static const char *VPN_STATES[] =
-        { "disabled", "waiting", "connecting", "connected" };
-
-        cJSON_AddStringToObject(s, "vpn_status", VPN_STATES[vs.state]);
+        cJSON_AddStringToObject(s, "vpn_status",
+                                vpn_manager_state_str(vs.state));
 
         char tip[32];
 

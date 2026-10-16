@@ -43,8 +43,10 @@ identical on every product built from the V6 core.
   address) **`sta_ip`** (2026-10-11, issue #977: the integration's station
   IP diagnostic sensor and the device card's `configuration_url` read it;
   the legacy `/check_status` had it for the polling integration, no
-  webhook push ever did) and (while the tunnel is up)
-  `vpn_status`/`vpn_ip` (HA's away-from-home backup endpoint).
+  webhook push ever did), `vpn_status` (always: `disabled | waiting |
+  paused | connecting | connected`, vpn_manager's own words since issue
+  #985) and, while the tunnel is up, `vpn_ip` (HA's away-from-home
+  backup endpoint).
   Sections are diffed in `changed` mode and omitted when empty; a fresh
   registration forces a full **resync** so a new HA sees the complete
   state (since 2026-10-11 that full push also primes the diff caches,

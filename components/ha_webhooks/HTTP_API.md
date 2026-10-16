@@ -85,9 +85,18 @@ then carries `status` (+ `config`) only - a status-only push is valid
   every push (contract-v2 ask #5): the integration's identity check
   (403 on mismatch) and update entity depend on them. Diff mode
   overlays them back after the diff.
-- **`vpn_ip` / `vpn_status`**: present while the WireGuard/Tailscale
-  tunnel is CONNECTED; HA records the address as the away-from-home
-  backup endpoint for registration + control commands.
+- **`vpn_status`**: always present, one of `disabled | waiting | paused |
+  connecting | connected`: vpn_manager's own words
+  (`vpn_manager_state_str()`, the same as `GET /api/vpn` `state`). Until
+  2026-10-16 (issue #985) this file kept a four-entry copy of the table
+  that `paused` outgrew: `connected` read past the table and `paused`
+  pushed "connecting". The integration treats a word containing `not`,
+  `disabled`, `disconnected`, `off` or `down` as the tunnel being down;
+  `paused` carries no `vpn_ip`, which clears its backup endpoint the
+  same way.
+- **`vpn_ip`**: present only while the WireGuard/Tailscale tunnel is
+  CONNECTED; HA records the address as the away-from-home backup
+  endpoint for registration + control commands.
 - **`sta_ip`** (issue #977, added 2026-10-11): the station's IPv4 while
   it holds one (`wifi_manager_get_sta_ip()`): the key the integration's
   station IP diagnostic sensor and the device card's `configuration_url`
