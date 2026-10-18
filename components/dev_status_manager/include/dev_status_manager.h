@@ -120,6 +120,12 @@ size_t dev_status_manager_format_uptime(char *buf, size_t buf_len);
 /** Running app version string (from the app descriptor); "" before init. */
 const char *dev_status_manager_app_version(void);
 
+/** The build's git describe (2026-10-18: the version string is the
+ *  release number from version.txt, so the commit lives here): set by
+ *  the composition root from the build, "" before. Static text only. */
+void dev_status_manager_set_app_build(const char *build);
+const char *dev_status_manager_app_build(void);
+
 /** Running partition label ("ota_0"/"ota_1"/...); "" before init. */
 const char *dev_status_manager_partition_label(void);
 

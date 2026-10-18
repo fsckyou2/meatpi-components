@@ -151,6 +151,10 @@ delivered as their `*_to_str` names, never raw numbers.
   updated by OTA from the factory firmware), `source` `boot`.
 - `planned_reason` values include `park_retry` (2026-10-05): a parked device
   started again, by `source` `park` (its timer) or `button`.
+- `planned_reason` values include `ota_rollback` (2026-10-18): the boot path
+  rolled a firmware update back to the previous slot after three quick
+  crashes of the new image (`fw_update_boot_check()`), `source` `boot`,
+  `flags` = the update job's id (`GET /api/fw_update` `last_result`).
 - After a power cycle the ring restarts (PSRAM `.noinit` is only warm-reset
   persistent); `boot_count` restarts at 1: that is correct behavior, not loss.
   The brake's count restarts with it; the stored report stays.

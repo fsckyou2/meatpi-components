@@ -70,6 +70,16 @@ esp_err_t config_backup_register_http(void);
  */
 void config_backup_touch(void);
 
+/**
+ * Refresh the copies now and wait up to @p wait_ms for the sweep (the
+ * pre-wipe step of a firmware update whose partition layout formats the
+ * data partitions, 2026-10-18). @p internal / @p sd (nullable) report
+ * whether that copy exists afterwards. ESP_ERR_INVALID_STATE when the
+ * copies are not running, ESP_ERR_TIMEOUT when the sweep is still going.
+ */
+esp_err_t config_backup_refresh_copies(uint32_t wait_ms, bool *internal,
+                                       bool *sd);
+
 #ifdef __cplusplus
 }
 #endif

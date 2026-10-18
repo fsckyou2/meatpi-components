@@ -42,6 +42,9 @@
  */
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -63,6 +66,17 @@ esp_err_t ha_webhooks_register_http(void);
 /** Register the `webhook` console command (gated by the `cli` setting;
  *  called internally from on_apply: main wires nothing, §6b). */
 esp_err_t ha_webhooks_register_cli(void);
+
+/**
+ * The firmware update keys of the push's status section (2026-10-18):
+ * `fw_update_available` (always sent in diff mode) and `fw_latest_version`
+ * ("" when unknown or the updater is off). The composition root provides
+ * them from fw_update; without a provider the keys are absent. Runs on
+ * the poster task (a PSRAM stack): no flash, RAM only.
+ */
+typedef bool (*ha_webhooks_fw_provider_t)(bool *available, char *latest,
+                                          size_t cap);
+esp_err_t ha_webhooks_set_fw_provider(ha_webhooks_fw_provider_t fn);
 
 #ifdef __cplusplus
 }

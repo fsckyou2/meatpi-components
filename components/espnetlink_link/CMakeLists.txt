@@ -7,6 +7,8 @@ idf_component_register(
          "espnetlink_link_migrate.c"
          "espnetlink_link_http.c"
          "espnetlink_link_cli.c"
+         "espnetlink_link_ensure.c"
+         "espnetlink_link_update.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     # Feature: the ESPNetLink LTE/GPS dongle as the internet uplink,

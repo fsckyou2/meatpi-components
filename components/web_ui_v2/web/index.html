@@ -1190,6 +1190,9 @@ function flabel(k){
 }
 const LABELS={
   enabled:"Enabled",cli:"Console commands",
+  /* fw_update (2026-10-18) */
+  "fw_update.enabled":"Check for updates automatically","fw_update.channel":"Release channel","fw_update.check_interval_h":"Check every (hours)",
+  "fw_update.base_url":"Release list address","fw_update.cert_set":"Certificate set for the release list",
   /* wifi_manager */
   "wifi_manager.mode":"WiFi mode",ap_ssid:"AP network name (SSID)",ap_password:"AP password",ap_auth:"AP security",
   ap_ip:"AP IP address",ap_channel:"AP channel",ap_bandwidth:"AP bandwidth",ap_hidden:"Hide AP network",
@@ -1267,6 +1270,11 @@ const LABELS={
 };
 const HELP={
   cli:"Register this component's commands on the serial console.",
+  /* fw_update (2026-10-18) */
+  "fw_update.enabled":"The device reads the MeatPi release list 90 s after it is online and then on the interval, and shows what is new here and in Home Assistant. Nothing installs by itself. Off: Check now and Update still work.",
+  "fw_update.channel":"Stable is what everyone gets. Beta sees release candidates too, alfa every test build. A channel never offers a downgrade.",
+  "fw_update.base_url":"Where the release list lives. The default is the MeatPi repository on GitHub; a test server needs a certificate set below, or an http:// address.",
+  "fw_update.cert_set":"A certificate set (System > Certificates) that signs a private release server. Empty: the built-in certificate bundle.",
   /* usb_acm_cli v2 (issue #978, 2026-10-11): a receiver is read by default; the console switch is the dongle's */
   "usb_acm_cli.gps":"Reads a GPS receiver plugged into the USB connector (NMEA, a u-blox for one): position, speed, heading and altitude join the vehicle data, Home Assistant and the dashboard. On by default: a receiver is read the moment it is plugged in. Off: a receiver on the connector is ignored.",
   "usb_acm_cli.console":"Lets WiCAN talk to the dongle's own console over the cable: the Dongle console tab, the acm console command, the acm bridge endpoint and a GPS poll of the dongle every 5 s in USB Ethernet mode. A USB GPS receiver does not need this.",
@@ -1352,6 +1360,7 @@ const HELP={
   sta_ip_mode:"Automatic (DHCP) works for almost every network.",
 };
 const ENUMS={
+  "fw_update.channel":{stable:"Stable",beta:"Beta (release candidates)",alfa:"Alfa (every test build)"},
   "wifi_manager.mode":{off:"Off",sta:"Station only (join a network)",ap:"Access point only",apsta:"Access point + Station"},
   "j1939.mode":{listen:"Listen only (never transmits)",active:"Active (claims an address, can ask and clear)"},
   ap_auth:{auto:"Automatic (WPA2)",wpa2:"WPA2",wpa2wpa3:"WPA2 / WPA3",wpa3:"WPA3"},
@@ -1832,7 +1841,8 @@ const PAGES={};
 const WAKE_PLANNED={power_wake:"Battery voltage recovered, woke from sleep",periodic_wake:"Periodic check-in, woke from sleep",
   user_request:"Restart requested",config_apply:"Settings applied",config_recovery:"Settings recovery",ota_apply:"Firmware update",
   factory_reset:"Factory reset",safe_mode:"Safe mode",internal_recovery:"Internal recovery restart",
-  park_retry:"Start after a crash park",partition_migrate:"Partition layout updated after a firmware update"};
+  park_retry:"Start after a crash park",partition_migrate:"Partition layout updated after a firmware update",
+  ota_rollback:"Firmware update rolled back after repeated crashes"};
 const WAKE_SOURCE={web_ui:"web UI",cmdline:"command line",console:"console",mqtt:"MQTT",ota:"OTA",safe_mode:"safe mode",
   sleep_mode:"power saving",button:"button",pairing:"pairing",park:"timer"};
 const WAKE_RESET={poweron:"Power-on",external:"External reset",software:"Software restart",panic:"Crash (panic)",deepsleep:"Woke from deep sleep",
@@ -4181,6 +4191,8 @@ PAGES.usb=async(view,sub)=>{
       ["Dongle AP",usbMode?"not used in USB Ethernet mode":(e.ssid||"not paired")],
       ["Device ID",e.device_id||"-"],
       ["Dongle firmware",fwCell],
+      ...(e.prefs&&e.prefs.agnss?[["Assisted GPS",e.prefs.agnss==="on"?chip("on","ok"):e.prefs.agnss==="enabled"?chip("on (turned on by this WiCAN)","ok"):e.prefs.agnss==="unsupported"?chip("not in this dongle firmware","warn"):e.prefs.agnss]]:[]),
+      ...(e.prefs&&(e.prefs.wifi_ap==="on"||e.prefs.wifi_ap==="enabled")?[["Dongle access point",e.prefs.wifi_ap==="on"?chip("on","ok"):chip("on (turned on by this WiCAN)","ok")]]:[]),
       ["Dongle address",e.host||"-"],
       ["USB attached",(e.usb||{}).attached?"yes":"no"],
       ["LTE",d.valid?(d.lte_connected?chip((d.operator||"connected")+(d.network_type?" · "+d.network_type:"")+(d.rssi_dbm?" · "+d.rssi_dbm+" dBm":""),"ok"):chip("not connected","warn")):(e.health_unsupported?chip("no health API in this dongle firmware","warn"):"-")],
@@ -4510,14 +4522,26 @@ PAGES.system=async(view,sub)=>{
       bar.style.width="100%";bar.style.background="var(--success)";msg.textContent="Complete, verifying and rebooting";
       expectReboot("Installing firmware");}
     catch(e){msg.textContent="Failed: "+e.message;msg.style.color="var(--danger)";flashBtn.disabled=false;}};
-  paneFw.append(card("Firmware Update","upload",
+  /* the updates pulled from the MeatPi release list (2026-10-18): the
+     Updates card from the on-demand chunk web/fwupdate.js, ahead of the
+     manual upload, which stays as it was */
+  const fwu=h("div",{id:"fwu-holder",style:"margin-bottom:16px"});
+  paneFw.append(fwu);
+  (async()=>{
+    if(!PAGES.__fwupdate)await loadScript("/ui/fwupdate.js");
+    if(!PAGES.__fwupdate){fwu.append(banner("crit","alert","The Updates card could not be loaded (/ui/fwupdate.js). Reload the page, or update the firmware."));return;}
+    try{fwu.append(await PAGES.__fwupdate.card());}
+    catch(e){fwu.append(banner("crit","alert","Updates: "+e.message));}
+  })();
+  paneFw.append(card("Manual update","upload",
     h("div",{style:"display:flex;align-items:center;justify-content:space-between;padding:11px 13px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;margin-bottom:14px"},
       h("div",{},h("div",{style:"font-size:13px;color:var(--text-2)"},"Installed"),h("div",{class:"mono",style:"font-weight:700"},st.version||"-")),
       h("div",{style:"text-align:right"},h("div",{style:"font-size:13px;color:var(--text-2)"},"Partition"),h("div",{class:"mono",style:"font-weight:700"},st.partition||"-"))),
     h("div",{class:"drop"},
       h("div",{style:"font-size:13.5px;color:var(--text-2);margin-bottom:10px"},"Select a firmware ",h("b",{class:"mono"},".bin")," file to flash."),
       h("div",{style:"display:flex;gap:10px;justify-content:center"},fileBtn,flashBtn),prog),
-    h("div",{style:"margin-top:12px;font-size:12px;color:var(--text-3)"},"Do not power off the device during a firmware update. Releases: ",
+    h("div",{style:"margin-top:12px;font-size:12px;color:var(--text-3)"},"Do not power off the device during a firmware update. Images and release notes: ",
+      h("a",{href:"https://github.com/meatpiHQ/meatpi-devices",target:"_blank"},"github.com/meatpiHQ/meatpi-devices"),", stable releases also on ",
       h("a",{href:"https://github.com/meatpiHQ/wican-fw/releases",target:"_blank"},"github.com/meatpiHQ/wican-fw"))));
   tabbedPage(wrap,"system",[
     {id:"maintenance",el:paneMaint},
@@ -4537,6 +4561,10 @@ PAGES.about=async(view)=>{
   wrap.append(card(inf.model||"WiCAN Pro","info",
     kv([
       ["Firmware version",(st&&st.version)||inf.fw_version||"-"],
+      /* the build beside the release number (2026-10-18: the version is
+         the release, the git describe lives in fw_build) */
+      ["Build",inf.fw_build||"-"],
+      ["Partition",inf.partition||(st&&st.partition)||"-"],
       ["Hardware",inf.hw_version||"-"],
       ["Device ID",inf.device_id||(st&&st.device_id)||"-"],
       ["MAC address",inf.mac||"-"],
@@ -5418,7 +5446,7 @@ PAGES.allsettings=async(view)=>{
   return null;
 };
 /* ============================================================ BOOT */
-const NICE={wifi_manager:"Wi-Fi",ble_manager:"Bluetooth",mqtt_manager:"MQTT",autopid:"AutoPID",vpn_manager:"VPN",data_logger:"Logger",sleep_manager:"Power saving",event_manager:"Automation rules",can_manager:"CAN bus",j2534_server:"J2534",usb_host_manager:"USB",led_manager:"LED",socket_manager:"Socket servers",bridge_manager:"Bridges",websocket_manager:"WebSocket channels",script_engine:"Scripts",obd_chip:"OBD chip",battery_monitor:"Battery",imu_manager:"Motion (IMU)",rtc_manager:"Clock",mdns_manager:"mDNS",cert_manager:"Certificates",usb_acm_cli:"USB serial (GPS receiver, ESPNetLink console)",espnetlink:"ESPNetLink",uds_manager:"UDS",interface_manager:"Radio arbitration",dev_status_manager:"Status flags",external_storage:"SD card",filesystem:"Filesystem",restart_tracker:"Restart tracking",log_manager:"Logging",cmdline_manager:"Console",ha_webhooks:"Home Assistant",data_destinations:"Data destinations",mqtt_can:"CAN over MQTT",http_server_manager:"Web server",obd_gate:"OBD gate",iperf_manager:"iPerf (throughput test)",log_sinks:"Log sinks",button_manager:"Button"};
+const NICE={fw_update:"Firmware updates",wifi_manager:"Wi-Fi",ble_manager:"Bluetooth",mqtt_manager:"MQTT",autopid:"AutoPID",vpn_manager:"VPN",data_logger:"Logger",sleep_manager:"Power saving",event_manager:"Automation rules",can_manager:"CAN bus",j2534_server:"J2534",usb_host_manager:"USB",led_manager:"LED",socket_manager:"Socket servers",bridge_manager:"Bridges",websocket_manager:"WebSocket channels",script_engine:"Scripts",obd_chip:"OBD chip",battery_monitor:"Battery",imu_manager:"Motion (IMU)",rtc_manager:"Clock",mdns_manager:"mDNS",cert_manager:"Certificates",usb_acm_cli:"USB serial (GPS receiver, ESPNetLink console)",espnetlink:"ESPNetLink",uds_manager:"UDS",interface_manager:"Radio arbitration",dev_status_manager:"Status flags",external_storage:"SD card",filesystem:"Filesystem",restart_tracker:"Restart tracking",log_manager:"Logging",cmdline_manager:"Console",ha_webhooks:"Home Assistant",data_destinations:"Data destinations",mqtt_can:"CAN over MQTT",http_server_manager:"Web server",obd_gate:"OBD gate",iperf_manager:"iPerf (throughput test)",log_sinks:"Log sinks",button_manager:"Button"};
 const HIDE=new Set(["main_bench"]);
 function niceName(n){return NICE[n]||n.replace(/_manager$/,"").replaceAll("_"," ").replace(/\b\w/g,c=>c.toUpperCase());}
 async function boot(){

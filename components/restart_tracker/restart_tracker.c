@@ -245,10 +245,23 @@ esp_err_t restart_tracker_stop(void)
     return ESP_OK; /* passive: nothing to stop */
 }
 
+static restart_tracker_pre_restart_fn s_pre_restart;
+
+esp_err_t restart_tracker_set_pre_restart_hook(restart_tracker_pre_restart_fn fn)
+{
+    s_pre_restart = fn;
+    return ESP_OK;
+}
+
 esp_err_t restart_tracker_mark_planned_restart(restart_tracker_planned_reason_t reason,
                                                restart_tracker_source_t source,
                                                uint32_t flags)
 {
+    if (s_pre_restart != NULL)
+    {
+        s_pre_restart(reason, source, flags); /* outside the spinlock */
+    }
+
     rt_inputs_t in = gather_inputs();
     rt_brake_state_t *count = rt_crash_brake_state();
 

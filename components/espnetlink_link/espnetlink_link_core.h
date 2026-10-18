@@ -135,6 +135,12 @@ const char *espnl_core_mode_str(espnl_core_mode_t mode);
  *  ("ncm"/"rndis"), or NULL for wifi_modem (class irrelevant: cut). */
 const char *espnl_core_mode_usb_class(espnl_core_mode_t mode);
 
+/** The dongle's wifi_manager.mode that keeps its access point up, given
+ *  the mode it reports (2026-10-19: the dongle ships with WiFi off):
+ *  "ap" from "off", "apsta" from "sta", NULL when the AP is already up
+ *  ("ap", "apsta") or the key is unknown ("", an older firmware). */
+const char *espnl_core_ap_mode_wanted(const char *current);
+
 /* ---- documents --------------------------------------------------------- */
 
 typedef struct

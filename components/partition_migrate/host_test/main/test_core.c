@@ -311,3 +311,76 @@ void test_unparsable_own_table_is_foreign(void)
                                        sizeof(ours), why, sizeof(why)));
     TEST_ASSERT_EQUAL_STRING("this build's own table does not parse", why);
 }
+
+/* ---- the layout id (2026-10-18) ------------------------------------------------- */
+
+static void hex16(const uint8_t *digest, char out[33])
+{
+    for (int i = 0; i < 16; i++)
+    {
+        snprintf(out + 2 * i, 3, "%02x", digest[i]);
+    }
+}
+
+void test_md5_vectors(void)
+{
+    uint8_t d[16];
+    char hex[33];
+    static const char FOX[] = "The quick brown fox jumps over the lazy dog";
+    uint8_t long_in[200];
+
+    pm_md5((const uint8_t *)"", 0, d);
+    hex16(d, hex);
+    TEST_ASSERT_EQUAL_STRING("d41d8cd98f00b204e9800998ecf8427e", hex);
+    pm_md5((const uint8_t *)"abc", 3, d);
+    hex16(d, hex);
+    TEST_ASSERT_EQUAL_STRING("900150983cd24fb0d6963f7d28e17f72", hex);
+    pm_md5((const uint8_t *)FOX, strlen(FOX), d);
+    hex16(d, hex);
+    TEST_ASSERT_EQUAL_STRING("9e107d9d372bb6826bd81d3542a419d6", hex);
+    /* 56 bytes: the padding needs a second block */
+    pm_md5((const uint8_t *)"12345678901234567890123456789012345678901234567890123456",
+           56, d);
+    hex16(d, hex);
+    TEST_ASSERT_EQUAL_STRING("49f193adce178490e34d1b3a4ec0064c", hex);
+    /* 200 'a': several blocks */
+    memset(long_in, 'a', sizeof(long_in));
+    pm_md5(long_in, sizeof(long_in), d);
+    hex16(d, hex);
+    TEST_ASSERT_EQUAL_STRING("887f30b43b2867f4a9accceee7d16e6c", hex);
+}
+
+void test_table_md5_is_the_stored_digest(void)
+{
+    char hex[33];
+    char stored[33];
+    uint8_t flash[PM_TABLE_MAX_LEN];
+
+    /* the digest IDF appended: the last 16 bytes of each table */
+    TEST_ASSERT_TRUE(pm_table_md5(V6_PRO_TABLE, sizeof(V6_PRO_TABLE), hex));
+    hex16(V6_PRO_TABLE + sizeof(V6_PRO_TABLE) - 16, stored);
+    TEST_ASSERT_EQUAL_STRING(stored, hex);
+    TEST_ASSERT_EQUAL_STRING("35c16cb5677477a27c662bd912582329", hex);
+
+    TEST_ASSERT_TRUE(pm_table_md5(LEGACY_PRO_TABLE, sizeof(LEGACY_PRO_TABLE), hex));
+    hex16(LEGACY_PRO_TABLE + sizeof(LEGACY_PRO_TABLE) - 16, stored);
+    TEST_ASSERT_EQUAL_STRING(stored, hex);
+    TEST_ASSERT_EQUAL_STRING("225242e6822a60aa93a9a67abd9442ed", hex);
+
+    /* the same table as the flash region holds it (0xFF padding) */
+    as_flash(flash, V6_PRO_TABLE, sizeof(V6_PRO_TABLE));
+    TEST_ASSERT_TRUE(pm_table_md5(flash, sizeof(flash), hex));
+    TEST_ASSERT_EQUAL_STRING("35c16cb5677477a27c662bd912582329", hex);
+
+    /* a table without the MD5 entry still has an id: the entries' digest */
+    as_flash(flash, V6_PRO_TABLE, sizeof(V6_PRO_TABLE) - 32);
+    TEST_ASSERT_TRUE(pm_table_md5(flash, sizeof(flash), hex));
+    TEST_ASSERT_EQUAL_STRING("35c16cb5677477a27c662bd912582329", hex);
+
+    /* blank flash and garbage have none */
+    memset(flash, 0xFF, sizeof(flash));
+    TEST_ASSERT_FALSE(pm_table_md5(flash, sizeof(flash), hex));
+    TEST_ASSERT_EQUAL_STRING("", hex);
+    memset(flash, 0x5A, sizeof(flash));
+    TEST_ASSERT_FALSE(pm_table_md5(flash, sizeof(flash), hex));
+}

@@ -152,6 +152,13 @@ typedef struct
     bool     carrier_synced;   /**< the last pass found the dongle holding
                                     them (or nothing to relay)           */
     char     carrier_note[96]; /**< why not, "" = fine                    */
+    /* the dongle preferences the pass enforces (2026-10-19): what the last
+       pass found and did. agnss: "" (no pass yet) | on | enabled (it was
+       off: this WiCAN turned it on) | unsupported (no such setting on the
+       dongle). wifi_ap: the same words, plus not_managed (a USB mode: the
+       dongle's radio is left as it is) */
+    char     prefs_agnss[12];
+    char     prefs_ap[12];
     /* counters */
     uint32_t polls;
     uint32_t failures;
@@ -200,6 +207,42 @@ esp_err_t espnetlink_link_repair(void);
  *  `POST /api/espnetlink/repair` */
 esp_err_t espnetlink_link_register_http(void);
 esp_err_t espnetlink_link_register_cli(void);
+
+/* ---- a firmware update of the dongle through this WiCAN (2026-10-19) ----
+ * The relay lives in fw_update and is wired by main (this component never
+ * depends on it): it asks where the dongle answers, holds the link's own
+ * traffic while it pushes the image, announces the restart, and reads the
+ * new version back. */
+
+typedef struct
+{
+    bool present;        /**< a dongle is known: attached, paired or seen  */
+    bool reachable;      /**< an address answers now (USB link or its AP)  */
+    char host[16];       /**< "192.168.7.1" (USB) or the AP gateway        */
+    char via[8];         /**< "usb" | "wifi" | ""                          */
+    bool steady;         /**< the pairing machine is at rest               */
+    bool usb_attached;   /**< the USB link is up                           */
+    char device_id[13];
+    char fw_version[24]; /**< from the last identify, "" never             */
+    int  api_level;      /**< 0 never                                      */
+} espnetlink_endpoint_t;
+
+esp_err_t espnetlink_link_endpoint(espnetlink_endpoint_t *out);
+
+/** Pause the link's polls, restore and recovery while an image is pushed
+ *  (the dongle's httpd is one worker). Auto-released after 15 min. */
+esp_err_t espnetlink_link_hold(bool hold);
+
+/** The dongle restarts on purpose (an image was pushed): hold the polls
+ *  and re-join its AP when it returns (a no-op on the USB link, where
+ *  the re-enumeration runs the pass by itself). */
+void espnetlink_link_expect_dongle_reboot(void);
+
+/** GET /api/info over the current address now, refreshing the status'
+ *  dongle_fw / dongle_api; @p out (nullable) receives the endpoint after.
+ *  ESP_ERR_NOT_FOUND when the dongle is not reachable. */
+esp_err_t espnetlink_link_identify_now(int timeout_ms,
+                                       espnetlink_endpoint_t *out);
 
 #ifdef __cplusplus
 }

@@ -47,6 +47,7 @@
 #include "autopid.h"
 #include "battery_monitor.h"
 #include "dev_status_manager.h"
+#include "ha_webhooks.h" /* ha_webhooks_fw_provider_t (2026-10-18) */
 #include "mdns_manager.h"
 #include "obd_chip.h"
 #include "sdkconfig.h"
@@ -66,6 +67,15 @@ static char *s_prev_autopid EXT_RAM_BSS_ATTR;
 static char *s_prev_config EXT_RAM_BSS_ATTR;
 static char *s_prev_gps EXT_RAM_BSS_ATTR;
 static volatile bool s_resync; /* next build = full snapshot */
+
+/* the firmware update keys' provider (the composition root's, 2026-10-18) */
+static ha_webhooks_fw_provider_t s_fw_provider;
+
+esp_err_t ha_webhooks_set_fw_provider(ha_webhooks_fw_provider_t fn)
+{
+    s_fw_provider = fn;
+    return ESP_OK;
+}
 
 void hw_payload_resync(void)
 {
@@ -107,6 +117,22 @@ static cJSON *build_status(void)
                             dev_status_manager_app_version());
     cJSON_AddStringToObject(s, "hw_version", CONFIG_WICAN_HW_VERSION);
     cJSON_AddStringToObject(s, "device_type", CONFIG_WICAN_DEVICE_TYPE);
+
+    /* the manifest updater's word (2026-10-18): the integration's update
+       entity reads these instead of the GitHub release list */
+    if (s_fw_provider != NULL)
+    {
+        bool available = false;
+        char latest[32] = "";
+
+        if (s_fw_provider(&available, latest, sizeof(latest)))
+        {
+            cJSON_AddBoolToObject(s, "fw_update_available", available);
+            cJSON_AddStringToObject(s, "fw_latest_version", latest);
+            cJSON_AddStringToObject(s, "fw_build",
+                                    dev_status_manager_app_build());
+        }
+    }
 
     const char *host = mdns_manager_hostname();
 
@@ -425,7 +451,7 @@ char *hw_payload_build(bool full_mode)
     if (sent != NULL && status != NULL)
     {
         static const char *IDENTITY_KEYS[] =
-        { "device_id", "fw_version", "hw_version" };
+        { "device_id", "fw_version", "hw_version", "fw_update_available" };
 
         for (size_t i = 0;
              i < sizeof(IDENTITY_KEYS) / sizeof(IDENTITY_KEYS[0]); i++)

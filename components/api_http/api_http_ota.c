@@ -31,6 +31,7 @@
  *        restart_tracker_restart(OTA_APPLY, WEB_UI), the standard deferred
  *        path, never a raw esp_restart().
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -54,6 +55,7 @@ typedef struct
 {
     bool started;
     bool failed;
+    bool busy;    /* another session was receiving: never abort it */
 } ota_upload_ctx_t;
 
 static bool ota_part_begin(const multipart_part_info_t *info, void *user_ctx)
@@ -74,9 +76,12 @@ static bool ota_part_begin(const multipart_part_info_t *info, void *user_ctx)
         return false; /* one image per request */
     }
 
-    if (ota_manager_begin(0) != ESP_OK) /* multipart: size unknown */
+    esp_err_t err = ota_manager_begin(0); /* multipart: size unknown */
+
+    if (err != ESP_OK)
     {
         ctx->failed = true;
+        ctx->busy = err == ESP_ERR_INVALID_STATE;
         return false;
     }
 
@@ -151,6 +156,13 @@ static esp_err_t ota_respond_ok(httpd_req_t *req)
     return err;
 }
 
+static esp_err_t ota_respond_busy(httpd_req_t *req)
+{
+    /* the session belongs to another transport (fw_update's pull, or a
+       second browser): this request never owned it, so it is not aborted */
+    return api_send_error(req, "409 Conflict", "update already in progress");
+}
+
 static esp_err_t ota_respond_fail(httpd_req_t *req)
 {
     ota_manager_status_t st;
@@ -161,9 +173,49 @@ static esp_err_t ota_respond_fail(httpd_req_t *req)
                           (st.error[0] != '\0') ? st.error : "upload failed");
 }
 
+/** `?sha256=<64 hex>`: the digest the image must have (2026-10-18), armed
+ *  for the session this request opens. False = malformed. */
+static bool arm_expected_digest(httpd_req_t *req)
+{
+    char query[160];
+    char hex[65];
+    uint8_t sha[32];
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "sha256", hex, sizeof(hex)) != ESP_OK)
+    {
+        return true; /* none asked */
+    }
+
+    if (strlen(hex) != 64)
+    {
+        return false;
+    }
+
+    for (int i = 0; i < 32; i++)
+    {
+        unsigned v;
+
+        if (sscanf(hex + 2 * i, "%2x", &v) != 1)
+        {
+            return false;
+        }
+
+        sha[i] = (uint8_t)v;
+    }
+
+    return ota_manager_expect_sha256(sha) == ESP_OK;
+}
+
 static esp_err_t ota_upload_handler(httpd_req_t *req)
 {
     esp_err_t err;
+
+    if (!arm_expected_digest(req))
+    {
+        return api_send_error(req, "400 Bad Request",
+                              "sha256 must be 64 hex characters");
+    }
 
     if (content_type_is_multipart(req))
     {
@@ -180,6 +232,11 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 
         err = multipart_upload_handle(req, &HANDLERS, &ctx, &cfg);
 
+        if (ctx.busy)
+        {
+            return ota_respond_busy(req);
+        }
+
         if (err != ESP_OK || !ctx.started || ctx.failed)
         {
             return ota_respond_fail(req);
@@ -190,15 +247,20 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         /* raw body: curl --data-binary @build/wican-fw.bin */
         if (req->content_len == 0)
         {
+            (void)ota_manager_expect_sha256(NULL);
             return api_send_error(req, "400 Bad Request", "empty body");
         }
 
         err = ota_manager_begin(req->content_len);
 
+        if (err == ESP_ERR_INVALID_STATE)
+        {
+            return ota_respond_busy(req);
+        }
+
         if (err != ESP_OK)
         {
-            return api_send_error(req, "409 Conflict",
-                                  "update already in progress");
+            return ota_respond_fail(req);
         }
 
         char *buf = malloc(OTA_RX_BUF); /* request-scoped (§12b) */
@@ -262,6 +324,11 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(resp, "total", st.total);
     cJSON_AddStringToObject(resp, "error", st.error);
     cJSON_AddStringToObject(resp, "partition", st.target);
+    /* 2026-10-18: the image's descriptor once its head is in, and whose
+       session it is (the pull installer's pipe, or an upload) */
+    cJSON_AddStringToObject(resp, "project_name", st.project_name);
+    cJSON_AddStringToObject(resp, "version", st.version);
+    cJSON_AddStringToObject(resp, "source", st.piped ? "fw_update" : "upload");
     return api_send_json(req, resp);
 }
 

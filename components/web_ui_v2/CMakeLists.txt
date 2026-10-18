@@ -78,8 +78,19 @@ if(CONFIG_WICAN_WEBUI_V2)
                 "${CMAKE_CURRENT_LIST_DIR}/tools/rjsmin.py"
         COMMENT "Minifying + gzipping web_ui_v2 backup.js chunk for embedding"
         VERBATIM)
-    add_custom_target(web_ui_v2_gz DEPENDS "${gz_html}" "${gz_js}" "${gz_files_js}" "${gz_monitor_js}" "${gz_setup_js}" "${gz_backup_js}")
-    set(embeds "${gz_html}" "${gz_js}" "${gz_files_js}" "${gz_monitor_js}" "${gz_setup_js}" "${gz_backup_js}")
+    # sixth chunk (2026-10-18): the Updates card of System > Firmware update
+    set(src_fwu_js "${CMAKE_CURRENT_LIST_DIR}/web/fwupdate.js")
+    set(gz_fwu_js  "${CMAKE_CURRENT_BINARY_DIR}/fwupdate.js.gz")
+    add_custom_command(
+        OUTPUT "${gz_fwu_js}"
+        COMMAND "${python}" "${CMAKE_CURRENT_LIST_DIR}/gzip_asset.py"
+                "${src_fwu_js}" "${gz_fwu_js}"
+        DEPENDS "${src_fwu_js}" "${CMAKE_CURRENT_LIST_DIR}/gzip_asset.py"
+                "${CMAKE_CURRENT_LIST_DIR}/tools/rjsmin.py"
+        COMMENT "Minifying + gzipping web_ui_v2 fwupdate.js chunk for embedding"
+        VERBATIM)
+    add_custom_target(web_ui_v2_gz DEPENDS "${gz_html}" "${gz_js}" "${gz_files_js}" "${gz_monitor_js}" "${gz_setup_js}" "${gz_backup_js}" "${gz_fwu_js}")
+    set(embeds "${gz_html}" "${gz_js}" "${gz_files_js}" "${gz_monitor_js}" "${gz_setup_js}" "${gz_backup_js}" "${gz_fwu_js}")
 endif()
 
 idf_component_register(

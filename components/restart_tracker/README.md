@@ -47,7 +47,19 @@ factory_reset / safe_mode / power_wake / internal_recovery / periodic_wake
 (sleep_manager's check-in, 2026-09-07: before that it was filed as
 power_wake) / park_retry (a parked device starts again, 2026-10-05) /
 partition_migrate (the partition table in flash was rewritten with this
-build's, 2026-10-10: `partition_migrate`, by `main_boot_layout()`).
+build's, 2026-10-10: `partition_migrate`, by `main_boot_layout()`) /
+ota_rollback (the boot path rolled a firmware update back to the previous
+slot after three quick crashes of the new image, 2026-10-18:
+`fw_update_boot_check()`, source `boot`, flags = the job id).
+
+**The pre-restart hook (2026-10-18).** `restart_tracker_set_pre_restart_hook()`
+installs one function that `restart_tracker_mark_planned_restart()` calls
+first, in the caller's context and outside the spinlock: fw_update confirms
+a pending image to the bootloader there (a settings submit two minutes
+after an update would otherwise make a rollback-enabled bootloader fall
+back). The hook must return within a second or two and may be called from a
+PSRAM-stack task, so a flash write inside it runs on an internal-stack
+helper.
 Sources: web_ui / cmdline / console / mqtt / ota / safe_mode / config_server
 / sleep_mode / button / pairing / park (the crash park's own timer) / boot
 (the boot path itself: the partition migration restart).

@@ -66,3 +66,14 @@ bool pm_entry_is_anchored(const pm_entry_t *e);
 pm_verdict_t pm_table_compare(const uint8_t *flash, size_t flash_len,
                               const uint8_t *ours, size_t ours_len,
                               char *why, size_t why_len);
+
+/**
+ * The layout id (2026-10-18): the MD5 of the 32-byte entries in flash order,
+ * which is the digest IDF appends to the table (CONFIG_PARTITION_TABLE_MD5)
+ * and what the meatpi-devices manifests key their layout verdicts on. As 32
+ * lowercase hex characters. False (and "") when the bytes are not a table.
+ */
+bool pm_table_md5(const uint8_t *buf, size_t len, char out[33]);
+
+/** RFC 1321 over @p len bytes (partition_migrate_md5.c). */
+void pm_md5(const uint8_t *data, size_t len, uint8_t digest[16]);

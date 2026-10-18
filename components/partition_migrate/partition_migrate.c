@@ -27,6 +27,27 @@ static const char *TAG = "partition_migrate";
 extern const uint8_t pm_table_start[] asm("_binary_partition_table_bin_start");
 extern const uint8_t pm_table_end[]   asm("_binary_partition_table_bin_end");
 
+/* the layout id of the table in flash, from the boot read ("" before) */
+static char s_flashed_md5[33];
+
+bool partition_migrate_flashed_md5(char out[33])
+{
+    if (out == NULL)
+    {
+        return false;
+    }
+
+    memcpy(out, s_flashed_md5, sizeof(s_flashed_md5));
+    return s_flashed_md5[0] != '\0';
+}
+
+bool partition_migrate_build_md5(char out[33])
+{
+    const size_t ours_len = (size_t)(pm_table_end - pm_table_start);
+
+    return pm_table_md5(pm_table_start, ours_len, out);
+}
+
 esp_err_t partition_migrate_init(void)
 {
     static const log_descriptor_t LOG =
@@ -187,6 +208,7 @@ esp_err_t partition_migrate_run(bool allow_rewrite,
         return err;
     }
 
+    (void)pm_table_md5(buf, PM_TABLE_MAX_LEN, s_flashed_md5);
     verdict = pm_table_compare(buf, PM_TABLE_MAX_LEN, pm_table_start,
                                ours_len, why, sizeof(why));
 

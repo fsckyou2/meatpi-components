@@ -16,6 +16,8 @@ void test_extra_data_partition_migrates(void);
 void test_md5_entry_ends_the_table(void);
 void test_too_many_entries_is_foreign(void);
 void test_unparsable_own_table_is_foreign(void);
+void test_md5_vectors(void);
+void test_table_md5_is_the_stored_digest(void);
 
 void app_main(void)
 {
@@ -32,5 +34,7 @@ void app_main(void)
     RUN_TEST(test_md5_entry_ends_the_table);
     RUN_TEST(test_too_many_entries_is_foreign);
     RUN_TEST(test_unparsable_own_table_is_foreign);
+    RUN_TEST(test_md5_vectors);
+    RUN_TEST(test_table_md5_is_the_stored_digest);
     UNITY_END();
 }

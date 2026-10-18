@@ -247,6 +247,7 @@ const char *restart_tracker_planned_reason_to_str(restart_tracker_planned_reason
         case RESTART_TRACKER_PLANNED_REASON_PERIODIC_WAKE:     return "periodic_wake";
         case RESTART_TRACKER_PLANNED_REASON_PARK_RETRY:        return "park_retry";
         case RESTART_TRACKER_PLANNED_REASON_PARTITION_MIGRATE: return "partition_migrate";
+        case RESTART_TRACKER_PLANNED_REASON_OTA_ROLLBACK:      return "ota_rollback";
         default:                                               return "invalid";
     }
 }

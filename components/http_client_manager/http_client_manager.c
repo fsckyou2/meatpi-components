@@ -24,12 +24,15 @@
  * @file http_client_manager.c
  * @brief The request engine: per-request esp_http_client instances (the
  *        thread-safety model, no shared client), the concurrency
- *        limiter, capped PSRAM responses, cert_set TLS, and the atomic
- *        download path (see include/http_client_manager.h).
+ *        limiter, capped PSRAM responses, cert_set TLS, redirects followed
+ *        by hand (2026-10-18: the manager never calls perform, so IDF's
+ *        own handling is inert), the streamed GET with a sink, and the
+ *        atomic download path (see include/http_client_manager.h).
  */
 #include "http_client_manager.h"
 
 #include <string.h>
+#include <strings.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -40,32 +43,25 @@
 #include "freertos/task.h"
 
 #include "cert_manager.h"
-#include "filesystem.h"
 #include "log_manager.h"
 
+#include "http_client_manager_engine.h"
 #include "http_client_manager_private.h"
 
 static const char *TAG = "http_client_manager";
 
 #define HC_DEFAULT_TIMEOUT_MS 10000
 #define HC_READ_CHUNK         2048
+#define HC_STREAM_CHUNK       4096
+/* a GitHub release asset answers 302 with a 1.2 KB signed Location: the
+   request line of the hop and the header must fit the client's buffers */
+#define HC_BUF_RX             2048
+#define HC_BUF_TX             2048
 
 static SemaphoreHandle_t s_limiter;
 static StaticSemaphore_t s_limiter_buf; /* internal: FreeRTOS object */
 static http_client_stats_t s_stats;
 static bool s_inited;
-
-/* ---- download machinery -------------------------------------------------------
- * The CALLER reads the network into one PSRAM buffer and feeds
- * filesystem's ASYNC PIPE (its internal-stack writer task does the
- * media writes): receive and write overlap, so the slower of (network,
- * media) sets the pace instead of their sum. */
-
-#define HC_DL_BUF_SIZE (32 * 1024)
-
-static uint8_t s_dl_buf[HC_DL_BUF_SIZE] EXT_RAM_BSS_ATTR;
-static SemaphoreHandle_t s_dl_mutex;      /* one download at a time     */
-static StaticSemaphore_t s_dl_mutex_buf;  /* internal: FreeRTOS object  */
 
 /* ---- lifecycle -------------------------------------------------------------- */
 
@@ -83,7 +79,7 @@ esp_err_t http_client_manager_init(void)
     s_limiter = xSemaphoreCreateCountingStatic(
         HTTP_CLIENT_MANAGER_MAX_CONCURRENT,
         HTTP_CLIENT_MANAGER_MAX_CONCURRENT, &s_limiter_buf);
-    s_dl_mutex = xSemaphoreCreateMutexStatic(&s_dl_mutex_buf);
+    (void)hc_xfer_init();
     s_inited = true;
     hcm_events_register();
     return ESP_OK;
@@ -97,6 +93,37 @@ esp_err_t http_client_manager_start(void)
 esp_err_t http_client_manager_stop(void)
 {
     return ESP_OK;
+}
+
+/* ---- lent to the transfer files (http_client_manager_engine.h) ---------------- */
+
+void hc_limiter_take(void)
+{
+    xSemaphoreTake(s_limiter, portMAX_DELAY);
+}
+
+void hc_limiter_give(void)
+{
+    xSemaphoreGive(s_limiter);
+}
+
+void hc_stats_note(bool ok, size_t rx)
+{
+    s_stats.bytes_rx += rx;
+
+    if (ok)
+    {
+        s_stats.requests++;
+    }
+    else
+    {
+        s_stats.failures++;
+    }
+}
+
+bool hc_inited(void)
+{
+    return s_inited;
 }
 
 /* ---- request core ------------------------------------------------------------ */
@@ -209,13 +236,87 @@ static esp_err_t apply_auth_headers(esp_http_client_handle_t client,
     return ESP_OK;
 }
 
-/** Open the connection, send the body, read up to @p cap bytes into
- *  @p buf (nullable sink cb for the download path). Runs entirely on
- *  the caller's task under the limiter. */
-static esp_err_t do_request(const http_client_request_t *req,
-                            uint8_t *buf, size_t cap, size_t *out_len,
-                            int *out_status,
-                            void (*progress_cb)(size_t, size_t))
+static esp_err_t on_http_event(esp_http_client_event_t *ev)
+{
+    hdr_capture_t *cap = ev->user_data;
+
+    if (ev->event_id == HTTP_EVENT_ON_HEADER && cap != NULL &&
+        cap->etag != NULL && ev->header_key != NULL &&
+        ev->header_value != NULL && strcasecmp(ev->header_key, "ETag") == 0)
+    {
+        strlcpy(cap->etag, ev->header_value, cap->etag_cap);
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * Open the connection, send the body and read the headers, following
+ * redirects by hand for a GET: IDF resolves a 3xx only inside
+ * esp_http_client_perform(), which this engine never calls. Returns the
+ * final status in @p status, the body length (-1 unknown, chunked) in
+ * @p total and the hops taken in @p hops.
+ */
+esp_err_t hc_open_and_fetch(esp_http_client_handle_t client,
+                                const http_client_request_t *req,
+                                int *status, int64_t *total, int *hops)
+{
+    bool is_get = req->method == HTTP_CLIENT_GET;
+
+    *hops = 0;
+
+    for (;;)
+    {
+        esp_err_t err = esp_http_client_open(client,
+                                             (*hops == 0) ? (int)req->body_len
+                                                          : 0);
+
+        if (err != ESP_OK)
+        {
+            return err;
+        }
+
+        if (*hops == 0 && req->body_len > 0)
+        {
+            int w = esp_http_client_write(client, req->body,
+                                          (int)req->body_len);
+
+            if (w != (int)req->body_len)
+            {
+                return ESP_FAIL;
+            }
+        }
+
+        *total = esp_http_client_fetch_headers(client);
+
+        if (*total < 0 && *total != -ESP_ERR_HTTP_EAGAIN)
+        {
+            return ESP_FAIL;
+        }
+
+        *status = esp_http_client_get_status_code(client);
+
+        if (!hc_redirect_follow(*status, is_get, *hops, HC_MAX_REDIRECTS))
+        {
+            return ESP_OK;
+        }
+
+        /* the Location header was captured by the parser; it becomes the
+           URL (scheme, host and port included), the connection is reopened */
+        if (esp_http_client_set_redirection(client) != ESP_OK)
+        {
+            ESP_LOGW(TAG, "%d without a Location: not followed", *status);
+            return ESP_OK;
+        }
+
+        esp_http_client_close(client);
+        (*hops)++;
+        ESP_LOGD(TAG, "redirect %d, hop %d", *status, *hops);
+    }
+}
+
+esp_http_client_handle_t hc_client_for(const http_client_request_t *req,
+                                       hdr_capture_t *cap)
 {
     esp_http_client_config_t cfg =
     {
@@ -225,7 +326,11 @@ static esp_err_t do_request(const http_client_request_t *req,
                                             : HC_DEFAULT_TIMEOUT_MS,
         .user_agent = "WiCAN/6",
         .skip_cert_common_name_check = req->skip_common_name,
-        .disable_auto_redirect = false,
+        .disable_auto_redirect = true, /* followed by hand (open_and_fetch) */
+        .buffer_size = HC_BUF_RX,
+        .buffer_size_tx = HC_BUF_TX,
+        .event_handler = on_http_event,
+        .user_data = cap,
     };
 
     if (hc_url_is_tls(req->url))
@@ -237,7 +342,7 @@ static esp_err_t do_request(const http_client_request_t *req,
 
     if (client == NULL)
     {
-        return ESP_FAIL;
+        return NULL;
     }
 
     if (req->content_type != NULL)
@@ -247,63 +352,57 @@ static esp_err_t do_request(const http_client_request_t *req,
     }
 
     apply_auth_headers(client, req);
+    return client;
+}
 
-    esp_err_t err = esp_http_client_open(client,
-                                         (int)req->body_len);
+/** Open the connection, send the body, read up to @p cap bytes into
+ *  @p buf. Runs entirely on the caller's task under the limiter. */
+static esp_err_t do_request(const http_client_request_t *req,
+                            uint8_t *buf, size_t cap, size_t *out_len,
+                            int *out_status, bool *out_truncated)
+{
+    esp_http_client_handle_t client = hc_client_for(req, NULL);
 
-    if (err == ESP_OK && req->body_len > 0)
+    if (client == NULL)
     {
-        int w = esp_http_client_write(client, req->body,
-                                      (int)req->body_len);
-
-        err = (w == (int)req->body_len) ? ESP_OK : ESP_FAIL;
+        return ESP_FAIL;
     }
 
     int64_t total = -1;
-
-    if (err == ESP_OK)
-    {
-        total = esp_http_client_fetch_headers(client);
-        err = (total >= 0 || total == -ESP_ERR_HTTP_EAGAIN) ? ESP_OK
-                                                            : ESP_FAIL;
-    }
-
+    int hops = 0;
+    esp_err_t err = hc_open_and_fetch(client, req, out_status, &total, &hops);
     size_t got = 0;
 
-    if (err == ESP_OK)
+    *out_truncated = false;
+
+    while (err == ESP_OK && got < cap)
     {
-        *out_status = esp_http_client_get_status_code(client);
+        size_t want = cap - got;
 
-        while (got < cap)
+        if (want > HC_READ_CHUNK)
         {
-            size_t want = cap - got;
-
-            if (want > HC_READ_CHUNK)
-            {
-                want = HC_READ_CHUNK;
-            }
-
-            int r = esp_http_client_read(client, (char *)buf + got,
-                                         (int)want);
-
-            if (r < 0)
-            {
-                err = ESP_FAIL;
-                break;
-            }
-
-            if (r == 0)
-            {
-                break; /* body complete */
-            }
-
-            got += (size_t)r;
-
-            if (progress_cb != NULL)
-            {
-                progress_cb(got, (total > 0) ? (size_t)total : 0);
-            }
+            want = HC_READ_CHUNK;
         }
+
+        int r = esp_http_client_read(client, (char *)buf + got, (int)want);
+
+        if (r < 0)
+        {
+            err = ESP_FAIL;
+            break;
+        }
+
+        if (r == 0)
+        {
+            break; /* body complete */
+        }
+
+        got += (size_t)r;
+    }
+
+    if (err == ESP_OK && got >= cap)
+    {
+        *out_truncated = !esp_http_client_is_complete_data_received(client);
     }
 
     esp_http_client_cleanup(client);
@@ -355,7 +454,8 @@ esp_err_t http_client_manager_request(const http_client_request_t *req,
 
     size_t len = 0;
     int status = -1;
-    esp_err_t err = do_request(req, buf, cap, &len, &status, NULL);
+    bool truncated = false;
+    esp_err_t err = do_request(req, buf, cap, &len, &status, &truncated);
 
     xSemaphoreGive(s_limiter);
 
@@ -370,6 +470,7 @@ esp_err_t http_client_manager_request(const http_client_request_t *req,
     out->data = (char *)buf;
     out->len = len;
     out->status_code = status;
+    out->truncated = truncated;
     return ESP_OK;
 }
 
@@ -398,86 +499,89 @@ esp_err_t http_client_manager_post(const char *url, const void *body,
     return http_client_manager_request(&req, out);
 }
 
-esp_err_t http_client_manager_download(const char *url,
-                                       const char *save_path,
-                                       void (*progress_cb)(size_t done,
-                                                           size_t total))
+esp_err_t http_client_manager_stream(const http_client_request_t *req,
+                                     const http_client_stream_cb_t *cb,
+                                     void *ctx,
+                                     http_client_stream_info_t *info)
 {
-    if (!hc_url_valid(url) || save_path == NULL || !s_inited)
+    if (req == NULL || cb == NULL || cb->on_data == NULL || info == NULL ||
+        !hc_url_valid(req->url) || !s_inited)
     {
         return ESP_ERR_INVALID_ARG;
     }
 
-    xSemaphoreTake(s_dl_mutex, portMAX_DELAY);   /* one download       */
-    xSemaphoreTake(s_limiter, portMAX_DELAY);    /* one request slot   */
+    memset(info, 0, sizeof(*info));
+    info->status_code = -1;
+    info->content_length = -1;
 
-    filesystem_wstream_t *ws = NULL;
-    esp_err_t err = filesystem_write_open(save_path, &ws);
-    bool pipe_open = false;
-    esp_http_client_handle_t client = NULL;
-    int status = -1;
-    size_t total_rx = 0;
+    uint8_t *buf = heap_caps_malloc(HC_STREAM_CHUNK,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
-    if (err == ESP_OK)
+    if (buf == NULL)
     {
-        err = filesystem_write_async_begin(ws);
-        pipe_open = (err == ESP_OK);
+        return ESP_ERR_NO_MEM;
     }
 
-    if (err == ESP_OK)
-    {
-        esp_http_client_config_t cfg =
-        {
-            .url = url,
-            .timeout_ms = HC_DEFAULT_TIMEOUT_MS,
-            .user_agent = "WiCAN/6",
-        };
+    http_client_request_t get = *req;
 
-        if (hc_url_is_tls(url))
-        {
-            cfg.crt_bundle_attach = esp_crt_bundle_attach;
-        }
+    get.method = HTTP_CLIENT_GET;
+    get.body = NULL;
+    get.body_len = 0;
 
-        client = esp_http_client_init(&cfg);
-        err = (client != NULL) ? esp_http_client_open(client, 0)
-                               : ESP_FAIL;
-    }
+    hdr_capture_t cap = { .etag = info->etag, .etag_cap = sizeof(info->etag) };
 
+    xSemaphoreTake(s_limiter, portMAX_DELAY);
+
+    esp_http_client_handle_t client = hc_client_for(&get, &cap);
+    esp_err_t err = (client != NULL) ? ESP_OK : ESP_FAIL;
     int64_t total = -1;
 
-    if (err == ESP_OK && client != NULL)
+    if (err == ESP_OK)
     {
-        total = esp_http_client_fetch_headers(client);
-        status = esp_http_client_get_status_code(client);
-        err = (total >= 0 && status >= 200 && status < 300)
-                  ? ESP_OK
-                  : ESP_ERR_INVALID_RESPONSE;
+        err = hc_open_and_fetch(client, &get, &info->status_code, &total,
+                             &info->hops);
     }
 
-    while (err == ESP_OK)
+    if (err == ESP_OK)
     {
-        /* read into our buffer while filesystem's writer task flushes
-         * the previous chunk: receive and media write overlap */
-        int r = esp_http_client_read(client, (char *)s_dl_buf,
-                                     sizeof(s_dl_buf));
+        info->content_length = (total >= 0) ? total : -1;
 
-        if (r < 0)
+        bool want_body = info->status_code >= 200 && info->status_code < 300;
+
+        if (cb->on_headers != NULL &&
+            !cb->on_headers(info->status_code, info->content_length, ctx))
         {
-            err = ESP_FAIL;
+            want_body = false;
+            err = ESP_ERR_INVALID_RESPONSE;
         }
-        else if (r == 0)
+
+        while (err == ESP_OK && want_body)
         {
-            break; /* body complete */
+            int r = esp_http_client_read(client, (char *)buf, HC_STREAM_CHUNK);
+
+            if (r < 0)
+            {
+                err = ESP_FAIL;
+            }
+            else if (r == 0)
+            {
+                break; /* body complete */
+            }
+            else
+            {
+                info->received += (size_t)r;
+                err = cb->on_data(buf, (size_t)r, ctx);
+            }
+        }
+
+        if (want_body)
+        {
+            info->complete = err == ESP_OK &&
+                             esp_http_client_is_complete_data_received(client);
         }
         else
         {
-            err = filesystem_write_async_chunk(ws, s_dl_buf, (size_t)r);
-            total_rx += (size_t)r;
-
-            if (progress_cb != NULL)
-            {
-                progress_cb(total_rx, (total > 0) ? (size_t)total : 0);
-            }
+            info->complete = err == ESP_OK; /* no body wanted */
         }
     }
 
@@ -486,38 +590,22 @@ esp_err_t http_client_manager_download(const char *url,
         esp_http_client_cleanup(client);
     }
 
-    if (pipe_open)
-    {
-        esp_err_t end_err = filesystem_write_async_end(ws,
-                                                       err == ESP_OK);
-
-        if (err == ESP_OK)
-        {
-            err = end_err;
-        }
-    }
-    else if (ws != NULL)
-    {
-        filesystem_write_abort(ws);
-    }
-
-    s_stats.bytes_rx += total_rx;
+    xSemaphoreGive(s_limiter);
+    heap_caps_free(buf);
+    s_stats.bytes_rx += info->received;
 
     if (err == ESP_OK)
     {
         s_stats.requests++;
-        ESP_LOGI(TAG, "downloaded %s -> %s (%u bytes)", url, save_path,
-                 (unsigned)total_rx);
     }
     else
     {
         s_stats.failures++;
-        ESP_LOGW(TAG, "download %s failed: %s (status %d)", url,
-                 esp_err_to_name(err), status);
+        ESP_LOGD(TAG, "stream %s failed: %s (status %d, %u bytes)", req->url,
+                 esp_err_to_name(err), info->status_code,
+                 (unsigned)info->received);
     }
 
-    xSemaphoreGive(s_limiter);
-    xSemaphoreGive(s_dl_mutex);
     return err;
 }
 

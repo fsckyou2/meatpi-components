@@ -81,6 +81,7 @@ typedef struct
     char *data;        /* PSRAM, NUL-terminated; free via _free()       */
     size_t len;
     int status_code;   /* -1 when the transport failed                  */
+    bool truncated;    /* the body went on past max_response (2026-10-18) */
 } http_client_response_t;
 
 /** Optional auth; set whichever apply (they combine). */
@@ -152,6 +153,77 @@ esp_err_t http_client_manager_download(const char *url,
                                        const char *save_path,
                                        void (*progress_cb)(size_t done,
                                                            size_t total));
+
+/* ---- the streamed GET (2026-10-18: fw_update's manifest and image) ------------ */
+
+typedef struct
+{
+    /** After the final headers (redirects followed): return false to stop
+     *  before any body byte (a status or a Content-Length the caller does
+     *  not want; the call then returns ESP_ERR_INVALID_RESPONSE). NULL =
+     *  take any 2xx. @p content_length is -1 when unknown (chunked). */
+    bool (*on_headers)(int status, int64_t content_length, void *ctx);
+    /** The body of a 2xx answer, chunk by chunk (4 KB at most); an error
+     *  stops the stream and is returned. Required. */
+    esp_err_t (*on_data)(const uint8_t *data, size_t len, void *ctx);
+} http_client_stream_cb_t;
+
+typedef struct
+{
+    int     status_code;    /* the final status, -1 when the transport failed */
+    int64_t content_length; /* -1 unknown                                    */
+    size_t  received;       /* body bytes handed to on_data                  */
+    bool    complete;       /* the body ended where the server said          */
+    int     hops;           /* redirects followed (at most 3)                */
+    char    etag[64];       /* the ETag header, "" when none                 */
+} http_client_stream_info_t;
+
+/**
+ * GET @p req->url and hand the body to @p cb->on_data as it arrives: no
+ * size cap, no buffering beyond one 4 KB PSRAM chunk. Redirects (301, 302,
+ * 303, 307, 308) are followed by hand, at most three hops: a GitHub release
+ * asset's 302 to its signed address works. `extra_headers` carries an
+ * If-None-Match when the caller has an ETag (a 304 returns ESP_OK with no
+ * body). The method is always GET; TLS as request(). The caller's stack
+ * carries the handshake (>= 8 KB). Transport failures return an error
+ * with @p info->status_code -1; an HTTP error status returns ESP_OK with
+ * the status and no body (the caller decides).
+ */
+esp_err_t http_client_manager_stream(const http_client_request_t *req,
+                                     const http_client_stream_cb_t *cb,
+                                     void *ctx,
+                                     http_client_stream_info_t *info);
+
+/* ---- the chunked upload (2026-10-19: the image pushed into the dongle) ---------- */
+
+/** Called after every chunk; return false to stop (the request ends with
+ *  ESP_ERR_INVALID_STATE and info->aborted set). */
+typedef bool (*http_client_upload_progress_t)(void *ctx, size_t sent,
+                                              size_t total);
+
+typedef struct
+{
+    int    status_code; /* -1 when the transport failed                    */
+    size_t sent;        /* body bytes written                              */
+    bool   aborted;     /* the progress callback said stop                 */
+    char   body[256];   /* the answer, NUL-terminated, cut at 255 bytes    */
+    size_t body_len;
+} http_client_upload_info_t;
+
+/**
+ * POST (or PUT) @p req->body in pieces of @p chunk bytes (0 = 8 KB) with
+ * the Content-Length announced at the open, @p progress after every piece,
+ * the answer read into @p info (its first 255 bytes). No redirect is
+ * followed. The request's timeout bounds every socket write and the wait
+ * for the answer (a peer that verifies an image before answering needs
+ * tens of seconds). Transport failures return an error with
+ * @p info->status_code -1 and @p info->sent telling how far it got.
+ */
+esp_err_t http_client_manager_upload(const http_client_request_t *req,
+                                     size_t chunk,
+                                     http_client_upload_progress_t progress,
+                                     void *ctx,
+                                     http_client_upload_info_t *info);
 
 void http_client_manager_free(http_client_response_t *resp);
 

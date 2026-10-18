@@ -301,6 +301,18 @@ const char *dev_status_manager_app_version(void)
     return s_app_desc.version;
 }
 
+static const char *s_app_build = "";
+
+void dev_status_manager_set_app_build(const char *build)
+{
+    s_app_build = (build != NULL) ? build : "";
+}
+
+const char *dev_status_manager_app_build(void)
+{
+    return s_app_build;
+}
+
 const char *dev_status_manager_partition_label(void)
 {
     return (s_running_partition != NULL) ? s_running_partition->label : "";

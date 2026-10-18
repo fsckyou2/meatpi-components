@@ -83,6 +83,23 @@ const char *espnl_core_mode_usb_class(espnl_core_mode_t mode)
     }
 }
 
+const char *espnl_core_ap_mode_wanted(const char *current)
+{
+    if (current == NULL || current[0] == '\0')
+    {
+        return NULL;
+    }
+    if (strcmp(current, "off") == 0)
+    {
+        return "ap";
+    }
+    if (strcmp(current, "sta") == 0)
+    {
+        return "apsta";
+    }
+    return NULL;
+}
+
 bool espnl_core_is_console_only(bool dev_present, uint16_t dev_vid,
                                 uint16_t dev_pid, bool eth_driver_bound)
 {

@@ -29,6 +29,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /** "http://host..." or "https://host..." with a non-empty host. */
 bool hc_url_valid(const char *url);
@@ -49,6 +50,15 @@ bool hc_auth_basic(const char *user, const char *pass, char *out,
  *  copies the key into @p key (cap bytes) and returns a pointer to the
  *  value inside @p header. NULL for malformed input. */
 const char *hc_header_split(const char *header, char *key, size_t cap);
+
+/** A redirect the client follows by hand (2026-10-18: the manager never
+ *  calls esp_http_client_perform, so IDF's own redirect handling is
+ *  inert): 301, 302, 303, 307 or 308 on a GET, while @p hops < @p max.
+ *  A POST / PUT / DELETE is never redirected (the body would have to be
+ *  sent again). */
+bool hc_redirect_follow(int status, bool is_get, int hops, int max_hops);
+
+#define HC_MAX_REDIRECTS 3
 
 /* event_manager glue (http_client_manager_events.c) */
 void hcm_events_register(void);

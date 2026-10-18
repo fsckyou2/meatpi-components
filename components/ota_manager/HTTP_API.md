@@ -27,13 +27,20 @@ integration can update in either order. Keep for ≥2 releases.
 { "ok": true, "received": 1510992, "partition": "ota_1", "reboot": true }
 ```
 
+**`?sha256=<64 hex>`** (2026-10-18): the digest the image must have; the
+session compares it before anything is activated. Malformed = 400
+`sha256 must be 64 hex characters`.
+
 **Errors**
 | Code | Body | When |
 |---|---|---|
 | 400 | `{"error":"image validation failed"}` | not a valid app image (magic/digest) |
 | 400 | `{"error":"short image (connection dropped?)"}` | body ended early vs Content-Length |
+| 400 | `{"error":"not a WiCAN PRO image: <project name>"}` | 2026-10-18: the descriptor's project name is none of ours (an ESPNetLink image, say); refused at the first 288 bytes, nothing written |
+| 400 | `{"error":"not an application image"}` / `"no application descriptor"` / `"an image for another chip (id 0x....)"` / `"short image (no application descriptor)"` | 2026-10-18: not an ESP32-S3 application image |
+| 400 | `{"error":"sha256 mismatch"}` | 2026-10-18: `?sha256=` was given and the bytes differ; the slot stays scratch |
 | 400 | `{"error":"flash write failed"}` / others | see `ota_manager_status().error` |
-| 409 | `{"error":"update already in progress"}` | a second concurrent upload |
+| 409 | `{"error":"update already in progress"}` | another session is receiving: a second upload, or the pull installer's (`GET /api/fw_update`); this request never aborts it |
 
 A failed upload leaves the RUNNING firmware untouched; simply retry.
 
@@ -44,9 +51,12 @@ progress bar during multipart uploads):
 
 ```json
 { "state": "receiving", "received": 524288, "total": 0,
-  "error": "", "partition": "ota_1" }
+  "error": "", "partition": "ota_1",
+  "project_name": "wican-fw_obd_pro", "version": "6.1.0", "source": "upload" }
 ```
 
 `state` ∈ `idle | receiving | ready | failed`; `total` is 0 for multipart
-(size unknown). **Measured**: a 1.44 MB image completes in ~8.3 s over
-Wi-Fi (−47 dBm bench).
+(size unknown); `project_name` / `version` are the image's descriptor once
+its first 288 bytes are in ("" before); `source` is `upload` or `fw_update`
+(the pull installer's pipe, 2026-10-18). **Measured**: a 1.44 MB image
+completes in ~8.3 s over Wi-Fi (−47 dBm bench).

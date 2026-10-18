@@ -7,6 +7,7 @@ set(pm_table_bin "${build_dir}/partition_table/partition-table.bin")
 idf_component_register(
     SRCS "partition_migrate.c"
          "partition_migrate_core.c"
+         "partition_migrate_md5.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     # spi_flash: the raw read, erase and write at the table's offset;

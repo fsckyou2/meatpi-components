@@ -198,12 +198,48 @@ dongle if that matters.
 | `espnetlink_link_repair()` | VBUS cycle → re-enumeration → key re-read. `ESP_ERR_INVALID_STATE` when the USB host is down. |
 | `espnetlink_link_register_http()` | `GET /api/espnetlink`, `POST /api/espnetlink/pair`, `POST /api/espnetlink/repair` (`components/HTTP_API.md` §6e9b). |
 | `espnetlink_link_register_cli()` | `espnetlink [pair <ssid> <password> \| repair]`: self-registered on the settings apply (`cli`). |
+| `espnetlink_link_endpoint(*out)` | 2026-10-19 (the firmware update relay in fw_update, wired by main): where the dongle answers now (`host`, `via` usb or wifi), whether a dongle is known at all, whether the pairing machine is at rest (`steady`), the USB link state, and the identity of the last identify (`device_id`, `fw_version`, `api_level`). |
+| `espnetlink_link_hold(bool)` | 2026-10-19: while on, the link task skips its GPS and health polls, the AP-path restore and the stale-AP recovery (an image is being pushed into the dongle's single httpd worker: a poll in the middle would stall it, three stalled polls would kick the association). Released by the caller or by itself after 15 min. |
+| `espnetlink_link_expect_dongle_reboot()` | 2026-10-19: the dongle restarts on purpose (an image was pushed): hold the polls and re-join its AP when it returns; a no-op on the USB link, where the re-enumeration runs the pass by itself. |
+| `espnetlink_link_identify_now(timeout_ms, *out)` | 2026-10-19: `GET /api/info` over the current address now, refreshing `dongle_fw` / `dongle_api`; `ESP_ERR_NOT_FOUND` when the dongle is not reachable. |
 
 Files: `espnetlink_link.c` engine/polls · `espnetlink_link_usb.c` the USB
 side (machine driver, HTTP over USB, store, VBUS, reboot) ·
 `espnetlink_link_pair.c` the change-guarded settings store ·
 `espnetlink_link_core.c` pure parsers + machine · `espnetlink_link_migrate.c`
 pure migration · `_settings.c` / `_http.c` / `_cli.c`.
+
+## The dongle preferences the pass enforces (2026-10-19)
+
+The dongle firmware ships with AGNSS off and its WiFi off since 2026-10-18
+(a fresh dongle keeps its radio quiet until a host asks). The pairing pass
+puts both right over the cable, with the dongle's own settings API and the
+one-restart contract of the sharing pass (`espnetlink_link_ensure.c`,
+`espnl_ensure_prefs()`): `gps.agnss_enabled` goes true in every mode
+(assistance data is what makes a cold fix take a minute instead of ten), and
+in `wifi_modem` mode the dongle's `wifi_manager.mode` goes `ap` from `off`
+(`apsta` from `sta`; `ap` and `apsta` are left alone: the pure rule
+`espnl_core_ap_mode_wanted()`, host-tested) before the key is read and the
+cut is sent, so the access point this WiCAN is about to join exists. In the
+USB modes the values ride the sharing pass's single submit; in `wifi_modem`
+they are submitted on their own and the pass starts over after the dongle's
+restart. A dongle firmware without the key or the component (404) is left as
+it is, with a D line. One extra dongle restart on the first contact with a
+fresh dongle, none afterwards. The status reports what the last pass found
+and did (`prefs {agnss, wifi_ap}` on `GET /api/espnetlink`: `on`, `enabled`
+= it was off and this WiCAN turned it on, `unsupported`, `not_managed` for
+the AP in a USB mode; the ESPNetLink card shows Assisted GPS and, when it
+is up, the dongle access point).
+
+## What a firmware update of the dongle needs from the link (2026-10-19)
+
+`espnetlink_link_update.c`: the four calls in the API table. The relay
+itself (the manifest, the staged image, the push, the restart, the version
+read back) lives in `fw_update` (its README): this component never depends
+on it; main wires `fw_update_dongle_ops_t` from these calls. During the
+push the hold keeps the link quiet; after the dongle's restart the USB
+machine re-enumerates and re-identifies as at every dongle boot, and the
+relay reads the new version from the status (or asks for an identify).
 
 ## Dependencies
 

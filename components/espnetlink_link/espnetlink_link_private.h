@@ -33,8 +33,11 @@
 
 #include "esp_err.h"
 
+#include "cJSON.h"
+
 #include "espnetlink_link.h"
 #include "espnetlink_link_core.h"
+#include "http_client_manager.h"
 
 /* ---- settings (boot-applied) -------------------------------------------- */
 
@@ -132,3 +135,39 @@ void espnl_engine_note_health(const espnl_health_t *h);
 /** The carrier settings' state after a pass: synced (the dongle holds
  *  them, or there is nothing to relay) or not, with the reason. */
 void espnl_engine_note_carrier(bool synced, const char *note);
+
+/** What the preference step found and did (2026-10-19): the words of
+ *  espnetlink_link_status_t.prefs_agnss / prefs_ap; NULL leaves one as it is. */
+void espnl_engine_note_prefs(const char *agnss, const char *ap);
+
+/* ---- the USB driver's HTTP helpers, lent to the other files ------------- */
+
+/** One request to the dongle over the USB link (3 s, 2 KB answer). False
+ *  on a transport failure; the HTTP status is in @p resp. */
+bool espnl_usb_request(const char *path, http_client_method_t method,
+                       const char *body, http_client_response_t *resp);
+
+/** POST /api/settings/submit on the dongle (it restarts to apply). */
+bool espnl_usb_submit(void);
+
+/** Read the dongle's settings document at @p path and stage @p key =
+ *  @p want when it differs (or sits staged with pending_reboot): 1 staged
+ *  (a submit is owed), 0 already so, -1 failure, -2 no such API (404).
+ *  Takes ownership of @p want. */
+int espnl_usb_ensure_setting(const char *path, const char *key,
+                             cJSON *want);
+
+/* ---- the dongle preferences (espnetlink_link_ensure.c, 2026-10-19) ------ */
+
+/** AGNSS on, and with @p want_ap the dongle's WiFi access point on
+ *  (wifi_modem mode). 1 = something was staged (and submitted when
+ *  @p submit: the dongle restarts), 0 = nothing to do, -1 = failure. */
+int espnl_ensure_prefs(bool want_ap, bool submit);
+
+/* ---- the update hold (espnetlink_link_update.c, 2026-10-19) ------------- */
+
+/** While on, the link task stops its polls, the AP-path restore and the
+ *  stale-AP recovery (an image is being pushed into the dongle's single
+ *  httpd worker). Released by the caller, or by itself after 15 min. */
+void espnl_engine_set_update_hold(bool hold);
+bool espnl_engine_update_hold(void);

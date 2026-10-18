@@ -24,6 +24,7 @@ they reset on reboot and are **not** settings.
 | `dev_status_manager_bit_name(bit)` | "sta_connected", … for logs/JSON. |
 | `dev_status_manager_format_uptime(buf,len)` | "HH:MM:SS" / "Nd HH:MM:SS". |
 | `dev_status_manager_app_version()` / `_partition_label()` | Running-image identity for status transports. |
+| `dev_status_manager_set_app_build(s)` / `_app_build()` | 2026-10-18: the build's git describe beside the release number (`fw_version` is `version.txt` since the constant project name; the commit lives here). Set by main from the `WICAN_FW_BUILD` define; `/api/info.fw_build`, the About page, the HA push. |
 | `dev_status_manager_device_id()` | THE device identity: 12 hex chars of the SoftAP MAC (legacy `hw_config_get_device_id`), BLE name (`WiCAN_<id>`), AP SSID and STA hostname all derive from it; no component reads the MAC for naming itself. |
 | `dev_status_manager_memory(*out)` | Both heaps (internal + PSRAM): total/free/min_free, and **largest_block** (the fragmentation signal, Architecture §12b) for the INTERNAL heap only. Poll-friendly: nothing in it keeps interrupts off for longer than ~0.15 ms (see "Interrupts and the status routes" below). `psram.largest_block` is 0 = not measured. |
 | `dev_status_manager_memory_deep(*out)` | The same with the PSRAM heap's `largest_block`: a walk of ~6000 blocks with interrupts off, 3 to 4 ms. For the boot report (`WICAN MEM`), the console (`system -m`) and `GET /api/status?deep=1`: something a person asked for, never a timer, never a polled route. |

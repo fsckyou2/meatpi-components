@@ -154,3 +154,14 @@ const char *hc_header_split(const char *header, char *key, size_t cap)
 
     return (*value != '\0') ? value : NULL;
 }
+
+bool hc_redirect_follow(int status, bool is_get, int hops, int max_hops)
+{
+    if (!is_get || hops >= max_hops)
+    {
+        return false;
+    }
+
+    return status == 301 || status == 302 || status == 303 || status == 307 ||
+           status == 308;
+}

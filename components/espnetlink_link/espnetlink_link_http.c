@@ -105,6 +105,12 @@ static esp_err_t status_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(o, "carrier_synced", st.carrier_synced);
     cJSON_AddStringToObject(o, "carrier_note", st.carrier_note);
 
+    /* the dongle preferences the pass enforces (2026-10-19) */
+    cJSON *prefs = cJSON_AddObjectToObject(o, "prefs");
+
+    cJSON_AddStringToObject(prefs, "agnss", st.prefs_agnss);
+    cJSON_AddStringToObject(prefs, "wifi_ap", st.prefs_ap);
+
     cJSON *u = cJSON_AddObjectToObject(o, "usb");
 
     if (u != NULL)

@@ -385,6 +385,15 @@ void test_brake_record_fields_and_names(void)
     TEST_ASSERT_EQUAL_STRING(
         "partition_migrate", restart_tracker_planned_reason_to_str(
                                  RESTART_TRACKER_PLANNED_REASON_PARTITION_MIGRATE));
+    /* fw_update_record.h keys the boot decision on the numeric values */
+    TEST_ASSERT_EQUAL(11, RESTART_TRACKER_PLANNED_REASON_PARTITION_MIGRATE);
+    TEST_ASSERT_EQUAL(12, RESTART_TRACKER_PLANNED_REASON_OTA_ROLLBACK);
+    TEST_ASSERT_EQUAL(4, RESTART_TRACKER_PLANNED_REASON_OTA_APPLY);
+    TEST_ASSERT_EQUAL(6, RESTART_TRACKER_PLANNED_REASON_SAFE_MODE);
+    TEST_ASSERT_EQUAL(10, RESTART_TRACKER_PLANNED_REASON_PARK_RETRY);
+    TEST_ASSERT_EQUAL_STRING(
+        "ota_rollback", restart_tracker_planned_reason_to_str(
+                            RESTART_TRACKER_PLANNED_REASON_OTA_ROLLBACK));
     TEST_ASSERT_EQUAL_STRING(
         "boot", restart_tracker_source_to_str(RESTART_TRACKER_SOURCE_BOOT));
     TEST_ASSERT_EQUAL_STRING(

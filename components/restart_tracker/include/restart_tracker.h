@@ -77,6 +77,10 @@ typedef enum
     RESTART_TRACKER_PLANNED_REASON_PARTITION_MIGRATE, /* the partition table
                                                          was rewritten with this
                                                          build's (2026-10-10)  */
+    /* the boot path rolled a firmware update back to the previous slot
+       after three quick crashes of the new image (fw_update_boot_check,
+       2026-10-18). Appended: fw_update_record.h keys on the value 12. */
+    RESTART_TRACKER_PLANNED_REASON_OTA_ROLLBACK,
 } restart_tracker_planned_reason_t;
 
 typedef enum
@@ -178,6 +182,19 @@ esp_err_t restart_tracker_stop(void);
 esp_err_t restart_tracker_mark_planned_restart(restart_tracker_planned_reason_t reason,
                                                restart_tracker_source_t source,
                                                uint32_t flags);
+
+/**
+ * A hook that runs at the start of every planned restart, in the caller's
+ * context, before the intent is recorded (2026-10-18; one consumer:
+ * fw_update confirms a pending image to the bootloader before a restart
+ * that is not a rollback or a park retry). Must return within a second or
+ * two; a flash write inside it goes through an internal-stack helper (the
+ * caller may be on a PSRAM stack). NULL removes it.
+ */
+typedef void (*restart_tracker_pre_restart_fn)(
+    restart_tracker_planned_reason_t reason, restart_tracker_source_t source,
+    uint32_t flags);
+esp_err_t restart_tracker_set_pre_restart_hook(restart_tracker_pre_restart_fn fn);
 
 /** The one sanctioned reboot: mark planned, then esp_restart(). No return. */
 void restart_tracker_restart(restart_tracker_planned_reason_t reason,

@@ -154,3 +154,57 @@ void config_backup_touch(void)
         cb_copies_touch();
     }
 }
+
+esp_err_t config_backup_refresh_copies(uint32_t wait_ms, bool *internal,
+                                       bool *sd)
+{
+    if (internal != NULL)
+    {
+        *internal = false;
+    }
+
+    if (sd != NULL)
+    {
+        *sd = false;
+    }
+
+    if (!s_started)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    cJSON *written = cJSON_CreateArray();
+
+    if (written == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = cb_copies_refresh(wait_ms, written);
+
+    if (err == ESP_OK)
+    {
+        const cJSON *w;
+
+        cJSON_ArrayForEach(w, written)
+        {
+            if (!cJSON_IsString(w))
+            {
+                continue;
+            }
+
+            if (internal != NULL && strcmp(w->valuestring, "internal") == 0)
+            {
+                *internal = true;
+            }
+
+            if (sd != NULL && strcmp(w->valuestring, "sd") == 0)
+            {
+                *sd = true;
+            }
+        }
+    }
+
+    cJSON_Delete(written);
+    return err;
+}

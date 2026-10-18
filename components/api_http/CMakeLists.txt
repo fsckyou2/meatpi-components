@@ -15,5 +15,5 @@ idf_component_register(
                   bridge_manager socket_manager websocket_manager
                   restart_tracker log_manager filesystem ota_manager
                   multipart_upload esp_http_server cmdline_manager
-                  esp_app_format config_backup
+                  esp_app_format config_backup partition_migrate
 )

@@ -65,3 +65,14 @@ esp_err_t partition_migrate_run(bool allow_rewrite,
 
 /** The result as text: ours / rewritten / needed / foreign / failed. */
 const char *partition_migrate_result_to_str(partition_migrate_result_t r);
+
+/**
+ * The layout ids (2026-10-18): the MD5 of the table's entries, as the
+ * meatpi-devices manifests key their verdicts (`layout.md5`,
+ * `layout_from`). The flashed one is cached from the boot read in
+ * partition_migrate_run() (false and "" before it, or when no table
+ * parses); the build's own comes from the embedded table. 32 lowercase
+ * hex characters into @p out[33].
+ */
+bool partition_migrate_flashed_md5(char out[33]);
+bool partition_migrate_build_md5(char out[33]);

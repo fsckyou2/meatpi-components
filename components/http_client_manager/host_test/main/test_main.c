@@ -81,6 +81,24 @@ static void test_header_split(void)
     TEST_ASSERT_NULL(hc_header_split("Key:", key, sizeof(key)));
 }
 
+static void test_redirect_rule(void)
+{
+    /* the GitHub release asset: 302 to the signed CDN address */
+    TEST_ASSERT_TRUE(hc_redirect_follow(302, true, 0, HC_MAX_REDIRECTS));
+    TEST_ASSERT_TRUE(hc_redirect_follow(301, true, 0, HC_MAX_REDIRECTS));
+    TEST_ASSERT_TRUE(hc_redirect_follow(303, true, 1, HC_MAX_REDIRECTS));
+    TEST_ASSERT_TRUE(hc_redirect_follow(307, true, 2, HC_MAX_REDIRECTS));
+    TEST_ASSERT_TRUE(hc_redirect_follow(308, true, 2, HC_MAX_REDIRECTS));
+    /* three hops, then the 3xx is the answer */
+    TEST_ASSERT_FALSE(hc_redirect_follow(302, true, 3, HC_MAX_REDIRECTS));
+    /* not a redirect */
+    TEST_ASSERT_FALSE(hc_redirect_follow(200, true, 0, HC_MAX_REDIRECTS));
+    TEST_ASSERT_FALSE(hc_redirect_follow(304, true, 0, HC_MAX_REDIRECTS));
+    TEST_ASSERT_FALSE(hc_redirect_follow(404, true, 0, HC_MAX_REDIRECTS));
+    /* a POST keeps its 3xx */
+    TEST_ASSERT_FALSE(hc_redirect_follow(302, false, 0, HC_MAX_REDIRECTS));
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
@@ -89,5 +107,6 @@ void app_main(void)
     RUN_TEST(test_bearer);
     RUN_TEST(test_basic_rfc7617_vector);
     RUN_TEST(test_header_split);
+    RUN_TEST(test_redirect_rule);
     UNITY_END();
 }

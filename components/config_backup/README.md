@@ -161,6 +161,7 @@ reloaded live: the restart loads the new files like any boot.
 | `config_backup_stop()` | stops the worker, drops the staged restore |
 | `config_backup_register_http()` | the `/api/backup` routes (main wires it before the server starts) |
 | `config_backup_touch()` | a sweep soon (api_http after an fs upload or delete); never blocks |
+| `config_backup_refresh_copies(wait_ms, &internal, &sd)` | 2026-10-18: refresh the copies now and wait for the sweep (fw_update's pre-wipe step: a release whose partition layout formats the data partitions refreshes the copies before the download); reports whether each copy exists afterwards; `ESP_ERR_INVALID_STATE` without the worker, `ESP_ERR_TIMEOUT` when the sweep is still going |
 
 ## Dependencies
 

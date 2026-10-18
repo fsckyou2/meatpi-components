@@ -43,6 +43,7 @@ its defaults there; v6 uploaded again through the legacy page finds its
 | `partition_migrate_init()` | Registers the log descriptor. No flash access. |
 | `partition_migrate_run(allow_rewrite, &result, &ms)` | Reads the 3 KB table region, compares, and with `allow_rewrite` rewrites a migratable table and verifies it by reading it back. `result`: `OURS` (the usual boot, one D line), `REWRITTEN` (the caller restarts now; `ms` = erase + write), `NEEDED` (migratable but not allowed, or built without the flash flag), `FOREIGN` (left alone, one E line), `FAILED` (read, erase, write or read-back failed, one E line). Returns `ESP_OK` for every verdict and an `esp_err_t` only for FAILED. Call from a task with an internal-RAM stack: the write runs with the cache off. |
 | `partition_migrate_result_to_str(r)` | `ours` / `rewritten` / `needed` / `foreign` / `failed`. |
+| `partition_migrate_flashed_md5(out[33])` / `_build_md5(out[33])` | 2026-10-18: the layout id, the MD5 of the table's 32-byte entries in flash order, which is the digest IDF appends to every table (`CONFIG_PARTITION_TABLE_MD5`) and what the meatpi-devices manifests key their verdicts on (`layout.md5`, `layout_from`): the WiCAN PRO v4.x factory table is `225242e6822a60aa93a9a67abd9442ed`, the v6 table `35c16cb5677477a27c662bd912582329`. The flashed one is cached from the boot read in `partition_migrate_run()` (false and "" before, or when no table parses); the build's own comes from the embedded table. `/api/info.layout_md5`, `GET /api/fw_update targets.self.layout`. Pure core: `pm_table_md5()` and an RFC 1321 `pm_md5()` in `partition_migrate_md5.c`. |
 
 The caller owns the restart and the loop guard. `main_boot_layout()`
 (main/main_boot.c) passes `allow_rewrite = false` when the restart tracker
@@ -106,7 +107,9 @@ None. No console command, no HTTP route.
 
 ## Tests
 
-- `host_test/`: 12 Unity tests on the pure core with the two real tables
+- `host_test/`: 14 Unity tests on the pure core with the two real tables
+  (2026-10-18: + the RFC 1321 vectors and the two tables' ids against the
+  digest IDF appended, with and without the MD5 entry, blank and garbage)
   as byte vectors (the v4.51p release's `partition-table.bin` and the v6
   build's): same, migrate, a moved app slot, a changed `nvs`/`otadata`, a
   missing `phy_init`, blank flash, garbage, an extra data partition, the

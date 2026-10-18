@@ -94,10 +94,32 @@ static volatile uint32_t s_poll_hold_until_ms;
 static volatile bool s_kick_sta;   /* the USB side saw the dongle reboot */
 static espnl_nofix_t s_nofix;      /* the GPS hint accumulator (task-only) */
 static uint32_t s_nofix_s;         /* its reading, under s_lock             */
+static volatile bool s_update_hold; /* an image is being pushed (2026-10-19) */
+static volatile uint32_t s_update_hold_until_ms;
+
+#define ESPNL_UPDATE_HOLD_MS (15u * 60u * 1000u)
 
 static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+void espnl_engine_set_update_hold(bool hold)
+{
+    s_update_hold_until_ms = now_ms() + ESPNL_UPDATE_HOLD_MS;
+    s_update_hold = hold;
+}
+
+bool espnl_engine_update_hold(void)
+{
+    if (s_update_hold &&
+        (int32_t)(now_ms() - s_update_hold_until_ms) >= 0)
+    {
+        s_update_hold = false;
+        ESP_LOGW(TAG, "update hold released by itself after 15 min");
+    }
+
+    return s_update_hold;
 }
 
 /* ---- public getters ------------------------------------------------ */
@@ -233,6 +255,24 @@ void espnl_engine_note_carrier(bool synced, const char *note)
     s_carrier_synced = synced;
     snprintf(s_carrier_note, sizeof(s_carrier_note), "%s",
              note != NULL ? note : "");
+    xSemaphoreGive(s_lock);
+}
+
+void espnl_engine_note_prefs(const char *agnss, const char *ap)
+{
+    if (s_lock == NULL)
+    {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (agnss != NULL)
+    {
+        snprintf(s_st.prefs_agnss, sizeof(s_st.prefs_agnss), "%s", agnss);
+    }
+    if (ap != NULL)
+    {
+        snprintf(s_st.prefs_ap, sizeof(s_st.prefs_ap), "%s", ap);
+    }
     xSemaphoreGive(s_lock);
 }
 
@@ -538,8 +578,12 @@ static void link_task(void *arg)
     {
         vTaskDelay(pdMS_TO_TICKS(ESPNL_TICK_MS));
 
-        /* 1. the USB side (pairing machine; may block on HTTP) */
-        espnl_usb_tick(ap_stale);
+        /* 1. the USB side (pairing machine; may block on HTTP). During
+         *    an update push the stale-AP recovery stays off: the dongle
+         *    is about to restart on purpose (2026-10-19). */
+        bool held = espnl_engine_update_hold();
+
+        espnl_usb_tick(held ? false : ap_stale);
         ap_stale = false;
 
         /* 2. where is the dongle reachable right now? */
@@ -643,6 +687,14 @@ static void link_task(void *arg)
             s_consec_fail = 0;
         }
         s_kick_sta = false;
+
+        /* an image is being pushed into the dongle's single httpd worker:
+         * no polls, no restore (the relay reads the status it needs) */
+        if (held)
+        {
+            s_consec_fail = 0;
+            continue;
+        }
 
         /* 4. polls, only while the dongle is reachable and not known to
          *    be rebooting */

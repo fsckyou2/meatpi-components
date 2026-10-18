@@ -668,7 +668,51 @@ chunk list. Chunks today: `scripts.js` (Scripts), `files.js` (File
 Manager) and `monitor.js` (CAN Monitor, 2026-09-07), `setup.js` (Quick Setup, 2026-10-01)
 and `backup.js` (the configuration backup cards of System > Maintenance,
 2026-10-11; a chunk that is not a page: the System page loads it and
-appends its cards).
+appends its cards), `fwupdate.js` (the Updates card of System > Firmware
+update, 2026-10-18, the same pattern).
+
+## Firmware updates (2026-10-18, `internal/TASK_fw_update.md`)
+
+Downloads go over WiFi only (Ali, 2026-10-19): on the dongle's mobile
+connection the card lists the updates under a warning banner and both
+Update buttons stay disabled with the reason as their tooltip; there is no
+cellular setting and no dialog that allows a mobile download.
+
+System > Firmware update opens with the **Updates** card from
+`web/fwupdate.js` over `GET /api/fw_update` (fw_update/HTTP_API.md): the
+legend tools carry "checked N ago" and **Check now** (`POST
+/api/fw_update/check`); one row per product (the ESPNetLink row, since
+2026-10-19, is the relay's: the dongle's reported version with a USB or
+WiFi chip, what its own release list offers, **Release notes** for
+`target=dongle`, **Update dongle** behind a dialog that says how the
+image travels and that internet through the dongle pauses for about a
+minute, `Needs a USB flash` with a docs link for a dongle firmware
+without an update route, `No ESPNetLink dongle is connected` when none
+is known; its job words name the dongle and the transport, Cancel
+disappears once the push started, the outcome reads `Dongle updated to
+X (sent in N s)` or a danger banner with the cause and Try again) with
+the installed version (its build as
+the tooltip, a `Development build` chip when the string is a git describe,
+`withdrawn` when the manifest yanked it), a second line "6.1.0 available,
+2026-10-20, <summary>" or the reason (Up to date, the stepping stone the
+channel does not carry, Needs a USB flash), and at the right edge **Release
+notes** (the modal renders the device-proxied markdown with `mdLite`:
+headings, lists, bold, inline code, https links; everything escaped) and
+**Update** (`POST /api/fw_update/install {target:"self", version}`), which
+asks first when the layout verdict is `wipe` (the dialog names the erased
+partitions, points at the backup, "Install and erase") and when the uplink
+is the dongle's mobile connection (`allow_cellular`). A running job shows
+its bar and phase under the rows with **Cancel** (`POST /api/fw_update/abort`),
+polled every 2 s; `rebooting` hands over to the page's reconnect screen.
+`last_result` paints the outcome after the restart: verifying (10 min or a
+planned restart), verified, rolled back (danger, with Try again) or did not
+start. The `fw_update` settings form sits under the rows (staged; the
+global Submit changes applies it with the restart); `base_url` and
+`cert_set` are advanced. The old upload card is **Manual update**, below.
+The About page shows the build (`/api/info.fw_build`) and the partition
+under the version. Mock scenes: `__mockPreset.fw` = `up_to_date |
+available | step | wipe | serial | cellular | job | rolled_back |
+no_manifest | yanked`; probe `probe_fw_update.mjs` (`FW UPDATE PROBE PASS`).
 
 ## Pages
 

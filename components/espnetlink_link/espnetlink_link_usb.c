@@ -366,6 +366,14 @@ static espnl_sm_event_t act_get_key(void)
         return ESPNL_EV_FAIL;
     }
 
+    /* the dongle preferences (2026-10-19): AGNSS on, and the access point
+     * this WiCAN is about to join; the same one-restart contract */
+    if (espnl_ensure_prefs(true, true) == 1)
+    {
+        espnl_engine_dongle_rebooting();
+        return ESPNL_EV_FAIL;
+    }
+
     if (!usb_request("/api/wifi_modem/credentials", HTTP_CLIENT_GET, NULL,
                      &resp))
     {
@@ -625,6 +633,15 @@ static espnl_sm_event_t act_ensure_share(void)
     {
         changed = changed || (r == 1);
     }
+
+    /* the dongle preferences ride the same submit (2026-10-19) */
+    int p = espnl_ensure_prefs(false, false);
+
+    if (p < 0)
+    {
+        return ESPNL_EV_FAIL;
+    }
+    changed = changed || (p == 1);
 
     if (!changed)
     {
@@ -954,4 +971,23 @@ esp_err_t espnl_usb_repair(void)
 const char *espnl_usb_host(void)
 {
     return s_attached ? ESPNL_USB_HOST_ADDR : "";
+}
+
+/* ---- lent to espnetlink_link_ensure.c / _update.c (2026-10-19) ---------- */
+
+bool espnl_usb_request(const char *path, http_client_method_t method,
+                       const char *body, http_client_response_t *resp)
+{
+    return usb_request(path, method, body, resp);
+}
+
+bool espnl_usb_submit(void)
+{
+    return dongle_submit();
+}
+
+int espnl_usb_ensure_setting(const char *path, const char *key,
+                             cJSON *want)
+{
+    return ensure_dongle_setting(path, key, want);
 }

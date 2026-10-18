@@ -66,6 +66,19 @@ static const char *GPS_HTTP_NOFIX =
     "{\"valid\":true,\"fix\":false,\"satellites\":0,\"sats_in_view\":6,"
     "\"fix_quality\":0,\"fix_type\":1,\"age_ms\":200}";
 
+/* the dongle ships with WiFi off since 2026-10-18: the AP the WiFi modem
+   path needs is enabled from the mode the dongle reports (2026-10-19) */
+void test_ap_mode_wanted(void)
+{
+    TEST_ASSERT_EQUAL_STRING("ap", espnl_core_ap_mode_wanted("off"));
+    TEST_ASSERT_EQUAL_STRING("apsta", espnl_core_ap_mode_wanted("sta"));
+    TEST_ASSERT_NULL(espnl_core_ap_mode_wanted("ap"));
+    TEST_ASSERT_NULL(espnl_core_ap_mode_wanted("apsta"));
+    TEST_ASSERT_NULL(espnl_core_ap_mode_wanted(""));
+    TEST_ASSERT_NULL(espnl_core_ap_mode_wanted(NULL));
+    TEST_ASSERT_NULL(espnl_core_ap_mode_wanted("bogus"));
+}
+
 void test_identity(void)
 {
     TEST_ASSERT_TRUE(espnl_core_is_espnetlink(0x303A, 0x4007));
@@ -484,6 +497,7 @@ void app_main(void)
     RUN_TEST(test_credentials_changed);
     RUN_TEST(test_url);
     RUN_TEST(test_mode_tokens);
+    RUN_TEST(test_ap_mode_wanted);
     RUN_TEST(test_gps_http_fix);
     RUN_TEST(test_gps_http_nofix);
     RUN_TEST(test_migrate_v1_unpaired_enables);

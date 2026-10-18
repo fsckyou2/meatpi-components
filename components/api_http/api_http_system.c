@@ -44,6 +44,7 @@
 #include "dev_status_manager.h"
 #include "http_server_manager.h"
 #include "log_manager.h"
+#include "partition_migrate.h"
 #include "restart_tracker.h"
 #include "settings_manager.h"
 
@@ -316,6 +317,17 @@ static esp_err_t info_handler(httpd_req_t *req)
                             dev_status_manager_app_version());
     cJSON_AddStringToObject(resp, "device_id",
                             dev_status_manager_device_id());
+    /* 2026-10-18: the build (git describe) beside the release number, the
+       running slot and the partition layout's id, so the HA integration
+       and a fleet tool reason about an update without guessing */
+    cJSON_AddStringToObject(resp, "fw_build", dev_status_manager_app_build());
+    cJSON_AddStringToObject(resp, "partition",
+                            dev_status_manager_partition_label());
+
+    char layout_md5[33] = "";
+
+    (void)partition_migrate_flashed_md5(layout_md5);
+    cJSON_AddStringToObject(resp, "layout_md5", layout_md5);
 
     uint8_t mac[6] = { 0 };
     char mac_str[18];
