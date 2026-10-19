@@ -22,35 +22,42 @@
 
 /**
  * @file j2534_channel.c
- * @brief J2534 channel transports (see j2534_channel.h). CAN → can_manager
- *        raw frames; ISO15765 → the registered ISO-TP provider
- *        (can_isotp.h) on the shared bus.
+ * @brief J2534 channel transports (see j2534_channel.h): lifecycle, the
+ *        CAN channel on can_manager (raw frames), the filter table, the
+ *        reflash gate and the bus-bitrate rule at CONNECT. The ISO15765
+ *        side (sessions, the SAE J2534-1 message layout, indications)
+ *        lives in j2534_channel_iso.c; both share j2534_channel_private.h.
  */
 #include "j2534_channel.h"
 
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
-#include "can_isotp.h"
+#include "can_core.h"
 #include "can_manager.h"
 #include "obd_gate.h"
-#include "can_core.h"
 
+#include "j2534_channel_private.h"
 #include "j2534_server.h"   /* J2534_MAX_CHANNELS */
 #include "j2534_server_private.h"
 
 static const char *TAG = "j2534_server";
 
-#define CH_CAN_QLEN 32
-
 /* ECU-flashing gate (see j2534_channel_set_allow_reflash). Default closed:
  * reprogramming is blocked until the operator explicitly enables it. */
 static bool s_allow_reflash;
+
+/* the channel records: PSRAM (no ISR and no flash path touches them) */
+EXT_RAM_BSS_ATTR static j2534_channel_t s_ch[J2534_MAX_CHANNELS];
+static SemaphoreHandle_t s_lock;
+static StaticSemaphore_t s_lock_buf;   /* internal: FreeRTOS object */
+static bool s_refused_said;            /* the refusal line went out this connect */
 
 void j2534_channel_set_allow_reflash(bool allow)
 {
@@ -74,84 +81,42 @@ static bool uds_is_reflash_sid(uint8_t sid)
     }
 }
 
-/* True if this write must be rejected because ECU flashing is disabled.
- * ISO15765: the UDS SID is data[0]. Raw CAN: data = [4-byte id][frame];
- * a hand-rolled ISO-TP single frame carries the SID after the PCI nibble
- * (SF: frame[1], FF: frame[2]), checked so the CAN channel can't be used
- * to smuggle a reflash past the ISO15765 gate. */
-static bool reflash_blocked(uint32_t protocol, const j2534_msg_t *msg)
+bool j2534_ch_reflash_sid_blocked(uint8_t sid)
 {
-    if (s_allow_reflash || msg->data_size == 0)
+    return !s_allow_reflash && uds_is_reflash_sid(sid);
+}
+
+/* Raw CAN: data = [4-byte id][frame]; a hand-rolled ISO-TP single or first
+ * frame carries the SID after the PCI (SF: frame[1], FF: frame[2]), checked
+ * so the CAN channel cannot smuggle a reflash past the ISO15765 gate. */
+static bool can_reflash_blocked(const j2534_msg_t *msg)
+{
+    if (s_allow_reflash || msg->data_size < 6)
     {
         return false;
     }
 
-    if (protocol == J2534_PROT_ISO15765)
+    const uint8_t *f = msg->data + 4;
+    uint8_t pci = (uint8_t)(f[0] >> 4);
+
+    if (pci == 0x0)
     {
-        return uds_is_reflash_sid(msg->data[0]);
+        return uds_is_reflash_sid(f[1]);
     }
 
-    if (protocol == J2534_PROT_CAN && msg->data_size >= 6)
+    if (pci == 0x1 && msg->data_size >= 7)
     {
-        const uint8_t *f = msg->data + 4; /* skip the 4-byte CAN id */
-        uint8_t pci = (uint8_t)(f[0] >> 4);
-
-        if (pci == 0x0)                       /* single frame */
-        {
-            return uds_is_reflash_sid(f[1]);
-        }
-        if (pci == 0x1 && msg->data_size >= 7) /* first frame */
-        {
-            return uds_is_reflash_sid(f[2]);
-        }
+        return uds_is_reflash_sid(f[2]);
     }
 
     return false;
 }
 
-typedef struct {
-    uint32_t id;                        /* filter id (1-based)         */
-    uint32_t type;                      /* PASS / BLOCK                */
-    uint8_t  mask[8];
-    uint8_t  pattern[8];
-    uint8_t  len;
-} can_filter_t;
-
-typedef struct {
-    bool     in_use;
-    uint32_t protocol;
-    uint32_t flags;
-
-    /* CAN raw */
-    QueueHandle_t can_q;
-    int           can_sub;
-    can_filter_t  filters[J2534_CH_MAX_FILTERS];
-    int           n_filters;
-
-    /* ISO15765 (session on the registered ISO-TP provider) */
-    can_isotp_session_t isotp;
-    bool     isotp_bound;
-    uint32_t tx_id;
-    uint32_t rx_id;
-    bool     ext;
-
-    uint32_t next_filter_id;
-} channel_t;
-
-static channel_t s_ch[J2534_MAX_CHANNELS];
-static SemaphoreHandle_t s_lock;
-static StaticSemaphore_t s_lock_buf;
-static bool s_refused_said;    /* the refusal line went out this connect */
-
-/* ---- helpers ---------------------------------------------------------- */
-
-static uint32_t now_us(void) { return (uint32_t)esp_timer_get_time(); }
-
 /* A write the CAN node refused: it may not talk yet (listening for the
    bitrate on a silent bus with `auto`, a mismatch, listen-only). Counted
    on /api/j2534, said once per CONNECT (can_core says why, once per
    episode). 2026-10-17: a tester read the silent refusal as "no comm". */
-static void say_refused(const char *what)
+void j2534_ch_say_refused(const char *what)
 {
     j2534_srv_count_tx_refused();
 
@@ -238,49 +203,6 @@ static uint32_t get_id_be(const uint8_t *p)
            ((uint32_t)p[2] << 8) | p[3];
 }
 
-static bool isotp_bind(channel_t *c)
-{
-    if (can_isotp() == NULL)
-    {
-        ESP_LOGE(TAG, "ISO15765 not available in this build "
-                      "(no ISO-TP provider registered)");
-        return false;
-    }
-
-    if (can_manager_core_handle() == NULL)
-    {
-        return false;
-    }
-
-    if (c->isotp_bound)
-    {
-        can_isotp()->close(c->isotp);
-        c->isotp_bound = false;
-    }
-
-    can_isotp_cfg_t cfg = {
-        .tx_id        = c->tx_id,
-        .rx_id        = c->rx_id,
-        .ext_id       = c->ext,
-        .block_size   = 0,
-        .stmin_ms     = 0,
-        .padding_byte = (c->flags & J2534_TX_ISO15765_FRAME_PAD) ? 0xAA : 0x00,
-        .use_padding  = (c->flags & J2534_TX_ISO15765_FRAME_PAD) != 0,
-    };
-
-    if (can_isotp()->open(&cfg, &c->isotp) != ESP_OK)
-    {
-        ESP_LOGE(TAG, "isotp bind failed (tx %03lX rx %03lX)",
-                 (unsigned long)c->tx_id, (unsigned long)c->rx_id);
-        return false;
-    }
-
-    c->isotp_bound = true;
-    ESP_LOGI(TAG, "ISO15765 channel bound tx %03lX rx %03lX",
-             (unsigned long)c->tx_id, (unsigned long)c->rx_id);
-    return true;
-}
-
 /* ---- lifecycle -------------------------------------------------------- */
 
 void j2534_channel_init(void)
@@ -289,9 +211,17 @@ void j2534_channel_init(void)
     {
         s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
     }
+
+    /* no subscription yet: a zeroed record would name subscriber 0, which
+       belongs to someone else, and the teardown before a CONNECT would
+       unsubscribe it (latent before 2026-10-19) */
+    for (int i = 0; i < J2534_MAX_CHANNELS; i++)
+    {
+        s_ch[i].can_sub = -1;
+    }
 }
 
-static void teardown(channel_t *c)
+static void teardown(j2534_channel_t *c)
 {
     if (c->can_sub >= 0)
     {
@@ -303,11 +233,8 @@ static void teardown(channel_t *c)
         vQueueDelete(c->can_q);
         c->can_q = NULL;
     }
-    if (c->isotp_bound)
-    {
-        can_isotp()->close(c->isotp);
-        c->isotp_bound = false;
-    }
+    j2534_iso_unbind_all(c);
+    j2534_legacy_drop((int)(c - s_ch)); /* J1850: the slot's buffered replies */
     obd_gate_release(c); /* idempotent: only if this channel holds it */
     memset(c, 0, sizeof(*c));
     c->can_sub = -1;
@@ -318,12 +245,32 @@ void j2534_channel_reset_all(void)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (int i = 0; i < J2534_MAX_CHANNELS; i++)
     {
-        if (s_ch[i].in_use || s_ch[i].can_q || s_ch[i].isotp_bound)
+        if (s_ch[i].in_use || s_ch[i].can_q != NULL || s_ch[i].can_sub >= 0)
         {
             teardown(&s_ch[i]);
         }
     }
     xSemaphoreGive(s_lock);
+}
+
+/* every frame on the bus into the channel's queue: the traffic itself on
+   a CAN channel; first-frame peeks and the single frames no session owns
+   on an ISO15765 one */
+static bool subscribe_bus(j2534_channel_t *c, const char *name)
+{
+    c->can_q = xQueueCreate(J2534_CH_CAN_QLEN, sizeof(can_core_frame_t));
+
+    if (c->can_q == NULL ||
+        can_manager_subscribe_queue(c->can_q, 0, 0, c->ext, true,
+                                    &c->can_sub) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "no CAN subscription for the channel (queue memory "
+                      "or a free subscriber slot)");
+        return false;
+    }
+
+    (void)can_manager_subscriber_name(c->can_sub, name);
+    return true;
 }
 
 uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
@@ -335,14 +282,12 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
     }
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    channel_t *c = &s_ch[slot];
+    j2534_channel_t *c = &s_ch[slot];
     teardown(c);
     s_refused_said = false;
     c->in_use = true;
     c->protocol = protocol;
     c->flags = flags;
-    c->tx_id = tx_id;
-    c->rx_id = rx_id;
     c->ext = ext;
     c->next_filter_id = 1;
 
@@ -350,33 +295,39 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
 
     if (protocol == J2534_PROT_CAN)
     {
-        c->can_q = xQueueCreate(CH_CAN_QLEN, sizeof(can_core_frame_t));
-        if (c->can_q == NULL ||
-            can_manager_subscribe_queue(c->can_q, 0, 0, ext, true,
-                                        &c->can_sub) != ESP_OK)
+        if (!subscribe_bus(c, "j2534"))
         {
-            teardown(c);
             st = J2534_ERR_FAILED;
-        }
-        else
-        {
-            (void)can_manager_subscriber_name(c->can_sub, "j2534");
         }
     }
     else if (protocol == J2534_PROT_ISO15765)
     {
-        /* bind now if the tester gave tx/rx on CONNECT; otherwise wait
-         * for a FLOW_CONTROL filter to supply them */
-        if (tx_id != 0 && rx_id != 0 && !isotp_bind(c))
+        if (!subscribe_bus(c, "j2534_iso"))
         {
-            teardown(c);
             st = J2534_ERR_FAILED;
         }
+        else if (tx_id != 0 && rx_id != 0)
+        {
+            /* the ids on CONNECT (a WiCAN extension); standard tools arm a
+               FLOW_CONTROL filter instead. Padding follows each message. */
+            st = j2534_iso_bind(c, tx_id, rx_id, ext, false, NULL);
+        }
+    }
+    else if (protocol == J2534_PROT_J1850VPW)
+    {
+        /* J1850 VPW through the OBD chip (GM Class 2); PWM / K-line share
+           this dispatch when built. No CAN subscription: the chip owns the
+           bus and WRITE_MSGS collects the replies. */
+        st = j2534_legacy_connect(c);
     }
     else
     {
-        teardown(c);
         st = J2534_ERR_NOT_SUPPORTED;
+    }
+
+    if (st != J2534_STATUS_NOERROR)
+    {
+        teardown(c);
     }
 
     xSemaphoreGive(s_lock);
@@ -401,29 +352,27 @@ bool j2534_channel_active(int slot)
 
 /* ---- write ------------------------------------------------------------ */
 
-uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg)
+static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
 {
     if (slot < 0 || slot >= J2534_MAX_CHANNELS || !s_ch[slot].in_use)
     {
         return J2534_ERR_INVALID_CHANNEL_ID;
     }
 
-    channel_t *c = &s_ch[slot];
+    j2534_channel_t *c = &s_ch[slot];
     uint32_t st = J2534_STATUS_NOERROR;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
 
-    if (reflash_blocked(c->protocol, msg))
-    {
-        xSemaphoreGive(s_lock);
-        ESP_LOGW(TAG, "ECU flashing disabled: rejected a UDS reprogramming "
-                 "service (enable j2534_server.allow_reflash to permit)");
-        return J2534_ERR_NOT_SUPPORTED;
-    }
-
     if (c->protocol == J2534_PROT_CAN)
     {
-        if (msg->data_size < 4 || msg->data_size > 12)
+        if (can_reflash_blocked(msg))
+        {
+            ESP_LOGW(TAG, "ECU flashing disabled: rejected a UDS reprogramming "
+                     "service (enable j2534_server.allow_reflash to permit)");
+            st = J2534_ERR_NOT_SUPPORTED;
+        }
+        else if (msg->data_size < 4 || msg->data_size > 12)
         {
             st = J2534_ERR_INVALID_MSG;
         }
@@ -441,49 +390,44 @@ uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg)
 
                 if (err == ESP_ERR_INVALID_STATE)
                 {
-                    say_refused("CAN");
+                    j2534_ch_say_refused("CAN");
                 }
             }
         }
     }
     else if (c->protocol == J2534_PROT_ISO15765)
     {
-        if (!c->isotp_bound)
-        {
-            st = J2534_ERR_NO_FLOW_CONTROL;
-        }
-        else if (msg->data_size == 0)
-        {
-            st = J2534_ERR_INVALID_MSG;
-        }
-        else if (!can_manager_tx_ready())
-        {
-            say_refused("ISO15765");
-            st = J2534_ERR_FAILED;
-        }
-        else
-        {
-            /* an ESP-side requester on the shared bus: hold the
-               conversation gate from the request until READ_MSGS
-               delivers the reply (or the hold self-expires) so the
-               MIC chip (autopid) does not interleave; fail-open
-               (obd_gate.h). Owner identity = the channel. */
-            obd_gate_acquire(c, OBD_GATE_WAIT_MS);
-
-            if (can_isotp()->send(c->isotp, msg->data,
-                                  msg->data_size, 1000) != ESP_OK)
-            {
-                obd_gate_release(c);
-                st = J2534_ERR_FAILED;
-            }
-        }
+        st = j2534_iso_write(c, msg, indicate);
+    }
+    else if (c->protocol == J2534_PROT_J1850VPW)
+    {
+        st = j2534_legacy_write(c, slot, msg, indicate);
+    }
+    else
+    {
+        st = J2534_ERR_MSG_PROTOCOL_ID;
     }
 
     xSemaphoreGive(s_lock);
     return st;
 }
 
+uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg)
+{
+    return write_common(slot, msg, true);
+}
+
+uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg)
+{
+    return write_common(slot, msg, false);
+}
+
 /* ---- filters ---------------------------------------------------------- */
+
+static void filter_remove_at(j2534_channel_t *c, int i)
+{
+    c->filters[i] = c->filters[--c->n_filters];
+}
 
 uint32_t j2534_channel_add_filter(int slot, uint32_t type,
                                   const j2534_msg_t *mask,
@@ -496,49 +440,85 @@ uint32_t j2534_channel_add_filter(int slot, uint32_t type,
         return J2534_ERR_INVALID_CHANNEL_ID;
     }
 
-    channel_t *c = &s_ch[slot];
+    if (filter_id == NULL)
+    {
+        return J2534_ERR_NULL_PARAMETER;
+    }
+
+    j2534_channel_t *c = &s_ch[slot];
     uint32_t st = J2534_STATUS_NOERROR;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
 
     if (type == J2534_FLOW_CONTROL_FILTER)
     {
-        /* ISO15765: pattern id = rx, flow-control id = tx (first 4 bytes
-         * of each message's data, our convention) */
+        /* ISO15765: pattern = the ECU's response id, flow-control message =
+           the request id; its TxFlags name 29-bit ids and the padding of
+           the frames this session sends (SAE J2534-1) */
         if (c->protocol != J2534_PROT_ISO15765 ||
             pattern == NULL || flow_control == NULL ||
             pattern->data_size < 4 || flow_control->data_size < 4)
         {
             st = J2534_ERR_INVALID_MSG;
         }
+        else if (c->n_filters >= J2534_CH_MAX_FILTERS)
+        {
+            st = J2534_ERR_EXCEEDED_LIMIT;
+        }
         else
         {
-            c->rx_id = get_id_be(pattern->data);
-            c->tx_id = get_id_be(flow_control->data);
-            c->ext = (pattern->tx_flags & J2534_TX_CAN_29BIT_ID) != 0;
-            if (isotp_bind(c))
+            uint32_t fl = pattern->tx_flags | flow_control->tx_flags;
+            bool ext = (fl & J2534_TX_CAN_29BIT_ID) != 0;
+            bool pad = (flow_control->tx_flags & J2534_TX_ISO15765_FRAME_PAD) != 0;
+            uint32_t idmask = ext ? 0x1FFFFFFFu : 0x7FFu;
+            uint32_t rx = get_id_be(pattern->data) & idmask;
+            uint32_t tx = get_id_be(flow_control->data) & idmask;
+            int sess = -1;
+
+            st = j2534_iso_bind(c, tx, rx, ext, pad, &sess);
+
+            if (st == J2534_STATUS_NOERROR)
             {
-                *filter_id = c->next_filter_id++;
-            }
-            else
-            {
-                st = J2534_ERR_FAILED;
+                /* the tool re-arming the same ECU: its old record goes */
+                for (int i = 0; i < c->n_filters; i++)
+                {
+                    if (c->filters[i].type == J2534_FLOW_CONTROL_FILTER &&
+                        c->filters[i].session == sess)
+                    {
+                        filter_remove_at(c, i);
+                        break;
+                    }
+                }
+
+                j2534_ch_filter_t *f = &c->filters[c->n_filters++];
+
+                memset(f, 0, sizeof(*f));
+                f->id = c->next_filter_id++;
+                f->type = type;
+                f->session = sess;
+                *filter_id = f->id;
             }
         }
     }
     else if (type == J2534_PASS_FILTER || type == J2534_BLOCK_FILTER)
     {
-        if (c->n_filters >= J2534_CH_MAX_FILTERS || mask == NULL ||
-            pattern == NULL)
+        if (mask == NULL || pattern == NULL)
         {
-            st = J2534_ERR_FAILED; /* table full */
+            st = J2534_ERR_NULL_PARAMETER;
+        }
+        else if (c->n_filters >= J2534_CH_MAX_FILTERS)
+        {
+            st = J2534_ERR_EXCEEDED_LIMIT;
         }
         else
         {
-            can_filter_t *f = &c->filters[c->n_filters];
+            j2534_ch_filter_t *f = &c->filters[c->n_filters];
             uint8_t n = (uint8_t)(mask->data_size < 8 ? mask->data_size : 8);
+
+            memset(f, 0, sizeof(*f));
             f->id = c->next_filter_id++;
             f->type = type;
+            f->session = -1;
             f->len = n;
             memcpy(f->mask, mask->data, n);
             memcpy(f->pattern, pattern->data,
@@ -563,7 +543,7 @@ uint32_t j2534_channel_stop_filter(int slot, uint32_t filter_id)
         return J2534_ERR_INVALID_CHANNEL_ID;
     }
 
-    channel_t *c = &s_ch[slot];
+    j2534_channel_t *c = &s_ch[slot];
     uint32_t st = J2534_ERR_INVALID_FILTER_ID;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -571,7 +551,12 @@ uint32_t j2534_channel_stop_filter(int slot, uint32_t filter_id)
     {
         if (c->filters[i].id == filter_id)
         {
-            c->filters[i] = c->filters[--c->n_filters];
+            if (c->filters[i].type == J2534_FLOW_CONTROL_FILTER)
+            {
+                j2534_iso_unbind(c, c->filters[i].session);
+            }
+
+            filter_remove_at(c, i);
             st = J2534_STATUS_NOERROR;
             break;
         }
@@ -586,26 +571,52 @@ void j2534_channel_clear_filters(int slot)
     {
         return;
     }
+
+    j2534_channel_t *c = &s_ch[slot];
+
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_ch[slot].n_filters = 0;
+    for (int i = 0; i < c->n_filters; i++)
+    {
+        if (c->filters[i].type == J2534_FLOW_CONTROL_FILTER)
+        {
+            j2534_iso_unbind(c, c->filters[i].session);
+        }
+    }
+    c->n_filters = 0;   /* the ids given at CONNECT keep their session */
     xSemaphoreGive(s_lock);
 }
 
-/* apply PASS/BLOCK filters to a raw CAN frame's [id][data] view */
-static bool can_filters_pass(channel_t *c, const uint8_t *view, size_t len)
+bool j2534_ch_has_pass_filter(const j2534_channel_t *c)
 {
-    if (c->n_filters == 0)
+    for (int i = 0; i < c->n_filters; i++)
     {
-        return true; /* no filters = pass all (matches J2534 CAN default) */
+        if (c->filters[i].type == J2534_PASS_FILTER)
+        {
+            return true;
+        }
     }
 
+    return false;
+}
+
+/* apply PASS/BLOCK filters to a [id][data] view */
+bool j2534_ch_filters_pass(const j2534_channel_t *c, const uint8_t *view,
+                           size_t len)
+{
     bool any_pass = false, has_pass = false;
 
     for (int i = 0; i < c->n_filters; i++)
     {
-        can_filter_t *f = &c->filters[i];
+        const j2534_ch_filter_t *f = &c->filters[i];
+
+        if (f->type == J2534_FLOW_CONTROL_FILTER)
+        {
+            continue; /* a session, not a match rule */
+        }
+
         bool m = j2534_filter_match(f->mask, f->len, f->pattern, f->len,
                                     view, len);
+
         if (f->type == J2534_BLOCK_FILTER && m)
         {
             return false;
@@ -617,7 +628,7 @@ static bool can_filters_pass(channel_t *c, const uint8_t *view, size_t len)
         }
     }
 
-    return has_pass ? any_pass : true;
+    return has_pass ? any_pass : true; /* no PASS filter = pass all */
 }
 
 /* ---- rx poll ---------------------------------------------------------- */
@@ -629,7 +640,7 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
         return false;
     }
 
-    channel_t *c = &s_ch[slot];
+    j2534_channel_t *c = &s_ch[slot];
     if (!c->in_use)
     {
         return false;
@@ -646,35 +657,27 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
             uint8_t view[12];
             put_id_be(view, fr.id);
             memcpy(view + 4, fr.data, fr.dlc);
-            if (can_filters_pass(c, view, 4 + fr.dlc))
+            if (j2534_ch_filters_pass(c, view, 4u + fr.dlc))
             {
                 memset(out, 0, sizeof(*out));
                 out->protocol_id = J2534_PROT_CAN;
                 /* the frame's own RX-interrupt time, not the poll time */
-                out->timestamp = fr.ts_us ? fr.ts_us : now_us();
+                out->timestamp = fr.ts_us ? fr.ts_us
+                                          : (uint32_t)esp_timer_get_time();
                 out->rx_status = fr.ext ? J2534_RX_CAN_29BIT_ID : 0;
-                out->data_size = 4 + fr.dlc;
+                out->data_size = 4u + fr.dlc;
                 memcpy(out->data, view, out->data_size);
                 got = true;
             }
         }
     }
-    else if (c->protocol == J2534_PROT_ISO15765 && c->isotp_bound)
+    else if (c->protocol == J2534_PROT_ISO15765)
     {
-        size_t n = 0;
-        esp_err_t r = can_isotp()->recv(c->isotp, out->data,
-                                        sizeof(out->data), &n, 5);
-        if (r == ESP_OK && n > 0)
-        {
-            out->protocol_id = J2534_PROT_ISO15765;
-            out->rx_status = c->ext ? J2534_RX_CAN_29BIT_ID : 0;
-            out->tx_flags = 0;
-            out->timestamp = now_us();
-            out->extra_data_index = 0;
-            out->data_size = (uint32_t)n;
-            got = true;
-            obd_gate_release(c); /* the reply is in: conversation over */
-        }
+        got = j2534_iso_poll(c, out);
+    }
+    else if (c->protocol == J2534_PROT_J1850VPW)
+    {
+        got = j2534_legacy_poll(c, slot, out);
     }
 
     xSemaphoreGive(s_lock);

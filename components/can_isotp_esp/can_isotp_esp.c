@@ -70,7 +70,10 @@
 
 static const char *TAG = "can_isotp_esp";
 
-#define ISOTP_MAX_SESSIONS   5    /* 1 uds_manager + J2534_MAX_CHANNELS   */
+#define ISOTP_MAX_SESSIONS   9    /* 1 uds_manager + 8 J2534 flow-control
+                                     sessions (4 channels x up to 4 each,
+                                     2026-10-19); each takes a can_manager
+                                     subscriber slot while open           */
 #define ISOTP_TASK_STACK     4096 /* PSRAM: no flash from this task        */
 #define ISOTP_TASK_PRIO      9    /* just under can_core_rx (10)           */
 #define ISOTP_FRAME_Q_LEN    128  /* can_core_frame_t, 16 B each           */
@@ -78,10 +81,11 @@ static const char *TAG = "can_isotp_esp";
 #define ISOTP_IDLE_WAIT_MS   100  /* wake cadence with nothing in flight   */
 
 /* after any activity a session is polled at tick cadence for this long:
- * longer than the stack's N_Bs/N_Cr (Kconfig response timeout, 100 ms) so
- * a stalled transfer is always flagged by a poll and the link never stays
- * "in progress" forever */
-#define ISOTP_BUSY_MS        300
+ * longer than the stack's N_Bs/N_Cr (Kconfig response timeout, 1000 ms
+ * since 2026-10-19: ISO 15765-2's value, 100 ms before) so a stalled
+ * transfer is always flagged by a poll and the link never stays "in
+ * progress" forever */
+#define ISOTP_BUSY_MS        1200
 
 struct can_isotp_session
 {

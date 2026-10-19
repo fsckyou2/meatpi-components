@@ -7,13 +7,34 @@
 ## Summary
 
 SAE J2534 PassThru device: a tester (the Windows DLL, a phone app, a
-bench script) opens a session, connects CAN and ISO15765 channels, writes
-messages, sets filters and periodic messages, and receives bus traffic as
-unsolicited `RX_MSG` frames. One framed wire protocol runs over three
-transports: the TCP listener in this component (port 6809), USB CDC-ACM
-(`usb_cdc_device`) and BLE (`ble_j2534`, since 2026-09-21). Exactly one
-tester at a time across all of them; a second one is answered
-`ERR_DEVICE_IN_USE`.
+bench script) opens a session, connects CAN, ISO15765 and J1850 VPW
+channels, writes messages, sets filters and periodic messages, and
+receives bus traffic as unsolicited `RX_MSG` frames. One framed wire
+protocol runs over three transports: the TCP listener in this component
+(port 6809), USB CDC-ACM (`usb_cdc_device`) and BLE (`ble_j2534`, since
+2026-09-21). Exactly one tester at a time across all of them; a second one
+is answered `ERR_DEVICE_IN_USE`.
+
+J1850 VPW (GM Class 2, protocol id 1) rides the OBD chip, not the native
+CAN controller (2026-10-19, modelled on the nightjoker7 4.47p fork but
+rebuilt on the v6 `obd_chip` claim model and the chip's own
+`VTFullyRequestCk` USDT segmenter). Its messages are `[3-byte
+header][payload]` whole, no CAN-id prefix. CONNECT runs the VPW init on the
+chip (ATTP2, headers on, auto-receive); WRITE sets the header (ATSH,
+cached) and sends the payload, parsing the chip's reply lines back into the
+channel; PASS/BLOCK filters are applied in software over the header.
+Request/response only (no monitor task for unsolicited frames); GM 4x
+programming speed is not implemented. `J1850PWM`/`ISO9141`/`ISO14230` are
+chip-wired on the hardware but not built yet (`ERR_NOT_SUPPORTED`).
+
+ISO15765 messages are laid out as SAE J2534-1 says (2026-10-19): the
+4-byte CAN id first, then the UDS payload, in both directions, and the
+pad flag on each message. The device took the bare payload before, which
+no standard tool sends: a udsoncan tester's `10 03` reached the bus as the
+6-byte PDU `00 00 07 E0 10 03`, unpadded, and every request timed out
+(the field report of 2026-10-19, `test-reports/2026-10-19_0815_j2534_std_tool_repro.md`
+in the app repo). The Windows DLL copies messages verbatim and did not
+change. The wire version stays 1 (`J2534_WIRE_PROTOCOL.md` section 10).
 
 The CAN bitrate is the device's, not the tester's (2026-10-03): the native
 node runs at the `can_manager` setting, or at what its listen-before-talk
@@ -37,7 +58,9 @@ Layout (each file under the 700-line cap):
 | `include/j2534_proto.h`, `j2534_proto.c` | PURE codec + constants: header/message encode/decode, filter match, status names, the transport-agnostic framer (`j2534_frame_read`), `j2534_ack_encode`, the TCP gate predicate. Host-tested |
 | `j2534_server.c` | core: lifecycle, request dispatch (`j2534_srv_handle_frame`), periodic messages, the RX pump, status, the Exclusive-bus hold |
 | `j2534_server_transport.c` | the `j2534_transport_t` seam: session lock, send lock, coalesced frame writes, `j2534_server_serve_transport()`, the TCP listener + `allow_lan` gate, the legacy serial vtable adapter |
-| `j2534_channel.c/.h` | channels: CAN via `can_manager`, ISO15765 via the registered ISO-TP provider (`can_isotp.h`; `can_isotp_esp` in public builds), filters, the reflash gate |
+| `j2534_channel.c/.h`, `j2534_channel_private.h` | channels: lifecycle, CAN via `can_manager`, the filter table, the reflash gate, the bus-bitrate rule |
+| `j2534_channel_iso.c` | the ISO15765 side (2026-10-19): one ISO-TP session per FLOW_CONTROL filter on the registered provider (`can_isotp.h`; `can_isotp_esp` in public builds), the SAE J2534-1 message layout `[4-byte id][payload]` both ways, padding per message, single frames without a session (functional addressing), the TxDone and START_OF_MESSAGE indications |
+| `j2534_channel_legacy.c` | the J1850 VPW side (2026-10-19): the VPW init, header-cached WRITE through `obd_chip` (short payload as one frame, longer through `VTFullyRequestCk`), reply-line parsing with `7F xx 78` ridden out, a small PSRAM RX ring the pump drains; pure chip-command helpers live in `j2534_proto.c` |
 | `j2534_server_settings.c` / `_http.c` / `_cli.c` | descriptor, `/api/j2534`, the `j2534` command |
 
 ## API
@@ -59,10 +82,10 @@ early (`usb_cdc_device.c`, `ble_j2534.c` are the two templates).
 
 ## Dependencies
 
-`can_manager`, `obd_gate` (diagnostics hold + per-conversation gate), the
-ISO-TP provider slot (`can_isotp.h`), `settings_manager`, `log_manager`,
-`http_server_manager`, `cmdline_manager`, lwIP, `esp_netif`, `esp_timer`,
-cJSON.
+`can_manager`, `obd_gate` (diagnostics hold + per-conversation gate),
+`obd_chip` (J1850 VPW: the ELM/STN transactions), the ISO-TP provider slot
+(`can_isotp.h`), `settings_manager`, `log_manager`, `http_server_manager`,
+`cmdline_manager`, lwIP, `esp_netif`, `esp_timer`, cJSON.
 
 ## Settings (`j2534_server`, version 1, reboot-to-apply)
 
@@ -81,8 +104,12 @@ cJSON.
 |---|---|
 | `s_req_payload` (request payload), `s_rx_wire`, `s_tx_frame` (one whole frame) | 4384 + 4160 + 4164 B |
 | `j2534_msg_t` scratch: RX pump 1, handler 4, periodic slots 4 (each ~4.2 KB) | ~38 KB |
+| `s_pdu` (the ISO-TP reassembly scratch of the RX pump) | 4128 B |
+| channel records `s_ch` (4 channels: filters, 4 ISO-TP session slots, the indication ring) | ~1.7 KB |
+| J1850 legacy: one chip-reply buffer `s_resp` + the RX ring (8 × 520 B) | ~8.2 KB |
+| ISO-TP sessions themselves: the provider's (about 25 KB PSRAM + 1.2 KB internal each while open, `can_isotp_esp` README); each takes one of `can_manager`'s 16 subscriber slots, as does every channel's own CAN queue (32 frames) | per open session |
 | tasks `j2534` (TCP listener) + `j2534_rx` (RX pump): 4 KB stacks each | 8 KB (+ 2 TCBs internal) |
-| mutexes (send, session) | internal, ~180 B |
+| mutexes (send, session, channels) | internal, ~270 B |
 
 **Never put a `j2534_msg_t` on a task stack** (three of them overflowed a
 4 KB stack and reset the device, 2026-07-07). No flash writes anywhere in
@@ -96,12 +123,20 @@ this component.
 
 ## Testing
 
-- Host: `host_test/` (15 Unity cases: codec round trips and bounds,
+- Host: `host_test/` (26 Unity cases: codec round trips and bounds,
   filter match, status names, the framer with partial / delayed /
   dropped / malformed / discarded input, the ACK vectors of
-  `J2534_WIRE_PROTOCOL.md` section 7, the TCP gate predicate).
-- Benches (`tools/testbench/usb/`): `j2534_bench.py` (TCP handshake +
+  `J2534_WIRE_PROTOCOL.md` section 7, the TCP gate predicate, the
+  CONNECT baud rule, the ISO15765 layout helpers: split / join /
+  indication / single frame build and parse, and the J1850 VPW chip
+  helpers: header/payload split, ATSH, the VTFullyRequestCk builder +
+  checksum, reply-line decode / status / responsePending).
+- Benches (`tools/testbench/usb/`): `j2534_std_tool_bench.py` (the gate
+  `.\test.ps1 j2534std`: a standard tool's byte stream through the
+  installed DLL, udsoncan itself when the 32-bit Python is present ->
+  `J2534 STD TOOL PASS`), `j2534_bench.py` (TCP handshake +
   `--reflash`), `j2534_transport_probe.py` (raw CAN + ISO15765 on the
-  bus), `j2534_gate_test.py` (reflash gate), `j2534_serial_test.py`
+  bus), `j2534_auto_baud_bench.py` (`.\test.ps1 j2534auto`),
+  `j2534_gate_test.py` (reflash gate), `j2534_serial_test.py`
   (CDC-ACM); (`tools/testbench/ble/`): `ble_j2534_bench.py` +
   `ble_j2534_pi.py` -> `BLE J2534 PASS`. `TESTING.md` rows.

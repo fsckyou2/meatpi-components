@@ -28,10 +28,17 @@
  *        ISO15765 connect fails with a log line). Owned by
  *        j2534_server; the server pumps RX and pushes RX_MSG frames.
  *
- * Message data conventions (this wire protocol, TASK §4):
+ * Message data conventions (SAE J2534-1, both directions):
  *   CAN       msg.data = [4-byte big-endian CAN id][0..8 frame bytes]
- *   ISO15765  msg.data = the UDS payload (the CAN id is the channel's
- *             tx/rx id set at CONNECT or by a FLOW_CONTROL filter)
+ *   ISO15765  msg.data = [4-byte big-endian CAN id][UDS payload]; the
+ *             ISO-TP session for the id comes from a FLOW_CONTROL filter
+ *             (one session per filter, J2534_CH_MAX_SESSIONS per channel)
+ *             or from the ids given at CONNECT (a WiCAN extension). A
+ *             single-frame request to an id without a session (functional
+ *             addressing) goes out raw; its single-frame replies come back
+ *             through the channel's PASS filters. Padding follows each
+ *             message's ISO15765_FRAME_PAD (2026-10-19; the bare payload
+ *             and the pad flag on CONNECT before).
  */
 #pragma once
 
@@ -42,7 +49,8 @@
 
 #include "j2534_proto.h"
 
-#define J2534_CH_MAX_FILTERS 8
+#define J2534_CH_MAX_FILTERS  8
+#define J2534_CH_MAX_SESSIONS 4   /* ISO-TP sessions (ECUs) per channel */
 
 void j2534_channel_init(void);          /* one-time: mutex etc. */
 void j2534_channel_reset_all(void);     /* tester disconnected: tear down */
@@ -80,13 +88,24 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
 void j2534_channel_disconnect(int slot);
 bool j2534_channel_active(int slot);
 
-/** Send one PASSTHRU_MSG on the channel. J2534 status code. */
+/**
+ * Send one PASSTHRU_MSG on the channel. J2534 status code. An ISO15765
+ * transmit is followed by a TxDone indication (RX_MSG with rx_status
+ * TX_MSG_TYPE | TX_INDICATION and the id as data).
+ */
 uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg);
 
+/** The same for a periodic message: no TxDone indication (SAE J2534-1). */
+uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg);
+
 /**
- * Add a filter. For CAN: PASS/BLOCK matched in the RX pump. For
- * ISO15765: FLOW_CONTROL sets/rebinds the ISO-TP tx/rx ids (pattern =
- * rx id, flow-control msg = tx id). Returns status; *filter_id set on OK.
+ * Add a filter. PASS/BLOCK (both protocols): matched in the RX pump over
+ * the message data (the 4 id bytes first). FLOW_CONTROL (ISO15765 only):
+ * pattern = the ECU's response id, flow-control message = the request id,
+ * its TxFlags the 29-bit and padding choice; opens the ISO-TP session for
+ * that ECU (re-arming an ECU's filter rebinds its session). Returns
+ * status (ERR_EXCEEDED_LIMIT when the filter or session table is full);
+ * *filter_id set on OK.
  */
 uint32_t j2534_channel_add_filter(int slot, uint32_t type,
                                   const j2534_msg_t *mask,

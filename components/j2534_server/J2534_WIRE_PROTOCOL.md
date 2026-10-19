@@ -15,7 +15,7 @@
 |---|---|
 | Wire version | 1 (`HELLO` answers it) |
 | Transports | TCP (port 6809), USB CDC-ACM serial, BLE (stream channel FFF5/FFF6) |
-| Protocols | SAE J2534-1: `CAN` (5) and `ISO15765` (6); anything else answers `ERR_NOT_SUPPORTED` |
+| Protocols | SAE J2534-1: `CAN` (5) and `ISO15765` (6) on the native controller, `J1850VPW` (1, GM Class 2) on the OBD chip; `J1850PWM`/`ISO9141`/`ISO14230` answer `ERR_NOT_SUPPORTED` (chip-wired, not built yet) |
 | Byte order | little-endian everywhere, EXCEPT the CAN id inside message data (big-endian, section 4) |
 | Session | one tester at a time across all transports (section 2) |
 
@@ -114,16 +114,37 @@ than CAN/ISO15765 (or no ISO-TP provider in the build), `ERR_FAILED` when
 all 4 channel slots are in use.
 
 `WRITE_MSGS`: messages are sent in order; the loop stops at the first
-failure and that status is the `ACK`. ISO15765 answers come back as
-`RX_MSG` (the ISO-TP reassembly is done for you).
+failure and that status is the `ACK`. ISO15765 messages carry the CAN id
+in their first 4 data bytes (section 4): the id picks the ECU's session
+(its FLOW_CONTROL filter, or the ids given at CONNECT); a message to an id
+with no session goes out as ONE single frame when the payload is at most 7
+bytes (functional addressing, 7DF) and is refused with
+`ERR_NO_FLOW_CONTROL` when it is longer. Each message's
+`ISO15765_FRAME_PAD` decides whether its frames are padded to 8 bytes.
+The reply is an `RX_MSG` with the ECU's id first (the ISO-TP reassembly
+is done for you). A successful ISO15765 transmit is followed by a TxDone
+indication: an `RX_MSG` whose `rx_status` is `TX_MSG_TYPE |
+TX_INDICATION` (0x09) and whose data is the 4-byte id alone; a first
+frame arriving on a session's id raises a `START_OF_MESSAGE` (0x02)
+indication the same way. Periodic messages raise no indications.
+`ISO15765_ADDR_TYPE` (extended addressing) is not supported:
+`ERR_INVALID_MSG`.
 
 Filters (max 8 per channel): `PASS`/`BLOCK` match `mask`/`pattern` over
-the message `data` bytes (for CAN that means the 4 id bytes first): a
-message matches when `((data[i] ^ pattern[i]) & mask[i]) == 0` over
-`min(mask_len, data_len)`; an empty mask passes everything. With no
-filter every frame passes. `FLOW_CONTROL` on an ISO15765 channel (re)binds
-the addressing: `pattern` data = the rx id (4 bytes BE), the flow-control
-message's data = the tx id.
+the message `data` bytes (the 4 id bytes first): a message matches when
+`((data[i] ^ pattern[i]) & mask[i]) == 0` over `min(mask_len,
+data_len)`; an empty mask passes everything. On a CAN channel with no
+filter every frame passes. On an ISO15765 channel the sessions deliver
+their ECUs' messages whatever the filters; single frames from ids no
+session owns (the replies to a functional request) are delivered only
+through a PASS filter. `FLOW_CONTROL` (ISO15765 only) opens an ISO-TP
+session for one ECU: `pattern` data = the ECU's response id (4 bytes
+BE), the flow-control message's data = the request id, its `tx_flags`
+the 29-bit choice and the padding of the frames the device sends to
+that ECU. Up to 4 sessions per channel (and 8 device-wide); a filter for
+an id the channel already serves rebinds that session and its old
+filter id lapses; `STOP_FILTER` closes the session; `ERR_EXCEEDED_LIMIT`
+when the filter or session table is full.
 
 `IOCTL` v1: `CLEAR_MSG_FILTERS (0x0A)` and `CLEAR_PERIODIC_MSGS (0x09)` act;
 `GET_CONFIG`, `SET_CONFIG`, `CLEAR_TX_BUFFER`, `CLEAR_RX_BUFFER` answer
@@ -135,9 +156,9 @@ message's data = the tx id.
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 4 | `protocol_id` (5 CAN, 6 ISO15765) |
-| 4 | 4 | `rx_status` (device to tester: `0x02 START_OF_MESSAGE` on an ISO15765 first-frame indication, `0x100 CAN_29BIT_ID`) |
-| 8 | 4 | `tx_flags` (tester to device: `0x100 CAN_29BIT_ID`, `0x40 ISO15765_FRAME_PAD`) |
+| 0 | 4 | `protocol_id` (1 J1850VPW, 5 CAN, 6 ISO15765) |
+| 4 | 4 | `rx_status` (device to tester: `0x01 TX_MSG_TYPE` + `0x08 TX_INDICATION` = the TxDone indication after an ISO15765 or J1850 transmit, `0x02 START_OF_MESSAGE` = an ISO15765 first frame arrived, `0x100 CAN_29BIT_ID`) |
+| 8 | 4 | `tx_flags` (tester to device: `0x100 CAN_29BIT_ID`, `0x40 ISO15765_FRAME_PAD`; `0x80 ISO15765_ADDR_TYPE` is refused) |
 | 12 | 4 | `timestamp` (device: microseconds since boot, taken in the CAN receive interrupt for CAN frames, at reassembly for ISO15765 PDUs; wraps every 71.6 min) |
 | 16 | 4 | `extra_data_index` |
 | 20 | 4 | `data_size` (0..4128) |
@@ -147,9 +168,30 @@ Data conventions:
 
 - **CAN**: `data = [4-byte BIG-ENDIAN CAN id][0..8 frame bytes]`, so
   `data_size` is 4..12. `7DF` is `00 00 07 DF`.
-- **ISO15765**: `data` = the UDS payload only; the ids come from
-  `CONNECT` or the FLOW_CONTROL filter. `ISO15765_FRAME_PAD` in
-  `tx_flags` pads single frames with `0xAA`.
+- **ISO15765**: `data = [4-byte BIG-ENDIAN CAN id][UDS payload]` in
+  both directions, exactly as SAE J2534-1 lays a PASSTHRU_MSG out: a
+  tester writes `00 00 07 E0 10 03`, the ECU's answer arrives as
+  `00 00 07 E8 50 03 ...`, an indication is the 4 id bytes alone.
+  `ISO15765_FRAME_PAD` in `tx_flags` pads that message's frames with
+  `0xAA`. **Until 2026-10-19 the device took the bare payload and read
+  the pad flag from `CONNECT`**; udsoncan and the OEM suites never did
+  that, so every UDS request they sent went out mangled and timed out.
+  A client written to the old convention adds the id on write and
+  strips it on read.
+- **J1850VPW** (GM Class 2, through the device's OBD chip): `data =
+  [3-byte header][payload]` whole, with NO CAN-id prefix, both ways, as
+  SAE J2534-1 carries a J1850 message (header = priority, target, source;
+  e.g. `68 6A F1` for a request to the ECU, `6C F1 10` on a reply). A
+  TxDone indication carries the 3 header bytes alone. The device sets the
+  header on the chip (ATSH), sends a short payload as one frame and a
+  longer one through the chip's `VTFullyRequestCk` segmenter, and parses
+  the chip's reply lines back into messages (UDS `7F xx 78`
+  responsePending interims are ridden out, not delivered). Request and
+  response only: unsolicited bus traffic between requests is not surfaced,
+  and GM 4x programming speed (service `$A1`, 41.6 kbit/s) is not
+  implemented (the bus stays at 10.4 kbit/s; `SET_CONFIG DATA_RATE` is
+  accepted but has no effect). `CONNECT` needs the OBD chip ready, else
+  `ERR_FAILED`.
 
 ## 5. Status codes
 
@@ -164,11 +206,12 @@ Data conventions:
 | `0x07` | `ERR_FAILED` | no free channel / periodic slot, timer failure, unknown message type |
 | `0x08` | `ERR_DEVICE_NOT_CONNECTED` | `CONNECT` before `OPEN` |
 | `0x09` | `ERR_TIMEOUT` | ISO-TP send/receive timed out |
-| `0x0A` | `ERR_INVALID_MSG` | malformed PASSTHRU_MSG, short payload, unknown periodic id |
+| `0x0A` | `ERR_INVALID_MSG` | malformed PASSTHRU_MSG, short payload, unknown periodic id, extended addressing |
+| `0x0C` | `ERR_EXCEEDED_LIMIT` | the channel's filter table (8) or its ISO-TP sessions (4; 8 device-wide) are all in use |
 | `0x10`..`0x12` | `ERR_BUFFER_*` | |
 | `0x14` | `ERR_MSG_PROTOCOL_ID` | message protocol does not match the channel |
 | `0x15` | `ERR_INVALID_FILTER_ID` | |
-| `0x16` | `ERR_NO_FLOW_CONTROL` | ISO15765 write without a bound tx/rx id |
+| `0x16` | `ERR_NO_FLOW_CONTROL` | an ISO15765 message longer than one frame to an id with no FLOW_CONTROL filter (session) |
 | `0x17` | `ERR_NOT_UNIQUE` | |
 | `0x18` | `ERR_INVALID_BAUDRATE` | `CONNECT` (CAN, ISO15765) with a baud the bus does not run at |
 | `0x19` | `ERR_INVALID_DEVICE_ID` | |
@@ -187,9 +230,14 @@ Data conventions:
   ISO15765 AND on raw CAN (the device peeks past the id at the ISO-TP
   PCI nibble of single/first frames). Read/diagnose freely, no ECU
   programming unless the owner opened the gate.
-- **ISO-TP sessions**: one per rx id; the device's own UDS terminal keeps
-  its session 5 s after its last request, so a `CONNECT` to that ECU
-  inside those 5 s fails. Retry.
+- **ISO-TP sessions**: one per FLOW_CONTROL filter (ECU), 4 per channel,
+  8 across the device, one per rx id; the device's own UDS terminal keeps
+  its session 5 s after its last request, so a filter for that ECU
+  inside those 5 s fails (`ERR_FAILED`). Retry. The flow control the
+  device sends as a receiver is BS 8 / STmin 1 ms; N_Bs and N_Cr are
+  1 s (ISO 15765-2). A multi-frame write waits for its last frame
+  before the `ACK` (about 10 ms per frame at the ECU's STmin, capped at
+  5.5 s).
 - Limits: 4 channels, 8 filters per channel, 4 periodic messages,
   periodic interval >= 5 ms. Received messages are pushed as soon as the
   RX pump sees them (no device-side queue beyond the channel's 32-frame
@@ -230,13 +278,18 @@ START_FILTER seq 5, ch 1, PASS 7E8 (mask FF FF FF FF, pattern 00 00 07 E8)
      <mask MSG: head with data_size 4 | FF FF FF FF> <pattern MSG: head with data_size 4 | 00 00 07 E8>
   <- 35 4A 01 80 05 00 01 00 08 00 00 00 | 00 00 00 00 | 01 00 00 00     (filter id 1)
 
-CONNECT ISO15765 seq 6 (protocol 6, tx 7E0, rx 7E8)
-  -> 35 4A 01 04 06 00 00 00 14 00 00 00 | 06 00 00 00 | 00 00 00 00 | 20 A1 07 00 | E0 07 00 00 | E8 07 00 00
+CONNECT ISO15765 seq 6 (protocol 6, flags 0, baud 500000; no ids: a FLOW_CONTROL filter follows)
+  -> 35 4A 01 04 06 00 00 00 14 00 00 00 | 06 00 00 00 | 00 00 00 00 | 20 A1 07 00 | 00 00 00 00 | 00 00 00 00
   <- ACK NOERROR, channel 2
-WRITE_MSGS ch 2: one ISO15765 message, data 22 F1 90   -> ACK NOERROR
-  <- RX_MSG ch 2, data 62 F1 90 31 57 43 41 4E 30 46 57 30 50 30 30 30 30 30 30 31   (VIN 1WCAN0FW0P0000001)
+START_FILTER seq 7, ch 2, FLOW_CONTROL: mask FF FF FF FF, pattern 00 00 07 E8, flow control 00 00 07 E0
+  (the three MSG heads carry tx_flags 40 00 00 00: the session pads its frames)   -> ACK NOERROR, filter id 1
+WRITE_MSGS ch 2: one ISO15765 message, tx_flags 0x40, data 00 00 07 E0 22 F1 90   -> ACK NOERROR
+  <- RX_MSG ch 2, rx_status 09 00 00 00, data 00 00 07 E0                              (TxDone)
+  <- RX_MSG ch 2, rx_status 02 00 00 00, data 00 00 07 E8                              (START_OF_MESSAGE: a first frame)
+  <- RX_MSG ch 2, data 00 00 07 E8 62 F1 90 31 57 43 41 4E 30 46 57 30 50 30 30 30 30 30 30 31   (VIN 1WCAN0FW0P0000001)
+  on the bus: 7E0 [03 22 F1 90 AA AA AA AA], then the ECU's first frame, the device's flow control, the consecutive frames
 
-Reflash gate: WRITE_MSGS ch 2, data 34 00 44 00 00 00 04 00
+Reflash gate: WRITE_MSGS ch 2, data 00 00 07 E0 34 00 44 00 00 00 04 00
   <- 35 4A 01 80 07 00 02 00 04 00 00 00 | 01 00 00 00                   (ERR_NOT_SUPPORTED)
 
 Second tester's HELLO (seq 4) while one is attached
@@ -301,3 +354,10 @@ exclusive, autopid_paused, transport, phase`. `POST /api/j2534
 version it does not know. Any change to the header, a payload layout or
 a status meaning bumps `J2534_WIRE_VERSION` in `j2534_proto.h` and this
 document together.
+
+2026-10-19, still version 1: the bytes of every frame and of the
+PASSTHRU_MSG head are unchanged; what changed is the meaning of an
+ISO15765 message's `data` (section 4: the id first, as J2534-1 says) and
+the device now sends the indications above. The Windows DLL copies
+messages verbatim and needed no change; the bench scripts and the BLE
+bench moved with the device.

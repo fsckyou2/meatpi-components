@@ -1,9 +1,14 @@
 /**
  * @file test_main.c
  * @brief Host tests for j2534_proto: header codec round-trip, bad-magic /
- *        short-buffer rejection, PASSTHRU_MSG round-trip + bounds, and
- *        the J2534 filter-match semantics.
- *        Expected output: 8 Tests 0 Failures 0 Ignored.
+ *        short-buffer rejection, PASSTHRU_MSG round-trip + bounds, the
+ *        J2534 filter-match semantics, the framer, the ACK vectors, the
+ *        TCP gate, the CONNECT baud rule, the ISO15765 message layout
+ *        (SAE J2534-1: [4-byte id][payload] both ways, the indications,
+ *        the functional single frame) and the J1850 VPW chip-command
+ *        helpers (header/payload split, ATSH, the VTFullyRequestCk builder
+ *        with its checksum, reply-line decode / status / responsePending).
+ *        Expected output: 26 Tests 0 Failures 0 Ignored.
  */
 #include <string.h>
 
@@ -368,6 +373,256 @@ static void test_connect_baud_check(void)
                              j2534_connect_baud_check(500000, 0));
 }
 
+/* ---- ISO15765 message layout (SAE J2534-1, 2026-10-19) ----------------- */
+
+/* udsoncan's DiagnosticSessionControl through the DLL: the id, then 10 03 */
+static void test_iso_split_layout(void)
+{
+    j2534_msg_t m = { 0 };
+    const uint8_t req[] = { 0x00, 0x00, 0x07, 0xE0, 0x10, 0x03 };
+    uint32_t id = 0;
+    const uint8_t *pl = NULL;
+    size_t n = 99;
+
+    m.protocol_id = J2534_PROT_ISO15765;
+    m.tx_flags = J2534_TX_ISO15765_FRAME_PAD;
+    m.data_size = sizeof(req);
+    memcpy(m.data, req, sizeof(req));
+
+    TEST_ASSERT_TRUE(j2534_iso_split(&m, &id, &pl, &n));
+    TEST_ASSERT_EQUAL_HEX32(0x7E0, id);
+    TEST_ASSERT_EQUAL(2, n);
+    TEST_ASSERT_EQUAL_HEX8(0x10, pl[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x03, pl[1]);
+
+    /* the id alone: nothing to send, still well formed */
+    m.data_size = 4;
+    TEST_ASSERT_TRUE(j2534_iso_split(&m, &id, &pl, &n));
+    TEST_ASSERT_EQUAL(0, n);
+
+    /* too short for an id */
+    m.data_size = 3;
+    TEST_ASSERT_FALSE(j2534_iso_split(&m, &id, &pl, &n));
+
+    /* extended addressing is not supported */
+    m.data_size = 7;
+    m.tx_flags = J2534_TX_ISO15765_ADDR_TYPE;
+    TEST_ASSERT_FALSE(j2534_iso_split(&m, &id, &pl, &n));
+
+    /* a 29-bit id comes through whole */
+    const uint8_t req29[] = { 0x18, 0xDA, 0x10, 0xF1, 0x3E, 0x00 };
+    m.tx_flags = J2534_TX_CAN_29BIT_ID;
+    m.data_size = sizeof(req29);
+    memcpy(m.data, req29, sizeof(req29));
+    TEST_ASSERT_TRUE(j2534_iso_split(&m, &id, &pl, &n));
+    TEST_ASSERT_EQUAL_HEX32(0x18DA10F1, id);
+    TEST_ASSERT_EQUAL(2, n);
+}
+
+static void test_iso_join_and_indication(void)
+{
+    static j2534_msg_t m;
+    static uint8_t big[J2534_MAX_DATA];
+    const uint8_t vin[] = { 0x62, 0xF1, 0x90, 'W', 'C', 'A', 'N' };
+    const uint8_t id7e8[] = { 0x00, 0x00, 0x07, 0xE8 };
+
+    TEST_ASSERT_TRUE(j2534_iso_join(&m, 0x7E8, false, vin, sizeof(vin), 1234));
+    TEST_ASSERT_EQUAL(J2534_PROT_ISO15765, m.protocol_id);
+    TEST_ASSERT_EQUAL_HEX32(0, m.rx_status);
+    TEST_ASSERT_EQUAL(4 + sizeof(vin), m.data_size);
+    TEST_ASSERT_EQUAL(m.data_size, m.extra_data_index);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(id7e8, m.data, 4);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(vin, m.data + 4, sizeof(vin));
+    TEST_ASSERT_EQUAL_UINT32(1234, m.timestamp);
+
+    /* 29-bit flags the status; an empty payload is still a message */
+    TEST_ASSERT_TRUE(j2534_iso_join(&m, 0x18DAF110, true, NULL, 0, 0));
+    TEST_ASSERT_EQUAL_HEX32(J2534_RX_CAN_29BIT_ID, m.rx_status);
+    TEST_ASSERT_EQUAL(4, m.data_size);
+
+    /* the cap: 4124 payload bytes fit behind the id, 4125 do not */
+    TEST_ASSERT_TRUE(j2534_iso_join(&m, 0x7E8, false, big, J2534_MAX_DATA - 4, 0));
+    TEST_ASSERT_EQUAL(J2534_MAX_DATA, m.data_size);
+    TEST_ASSERT_FALSE(j2534_iso_join(&m, 0x7E8, false, big, J2534_MAX_DATA - 3, 0));
+
+    /* TxDone and START_OF_MESSAGE carry the id only */
+    j2534_iso_indication(&m, 0x7E0, false,
+                         J2534_RX_TX_MSG_TYPE | J2534_RX_TX_INDICATION, 77);
+    TEST_ASSERT_EQUAL_HEX32(0x09, m.rx_status);
+    TEST_ASSERT_EQUAL(4, m.data_size);
+    TEST_ASSERT_EQUAL(4, m.extra_data_index);
+    TEST_ASSERT_EQUAL_HEX8(0xE0, m.data[3]);
+    TEST_ASSERT_EQUAL_UINT32(77, m.timestamp);
+    j2534_iso_indication(&m, 0x18DAF110, true, J2534_RX_START_OF_MESSAGE, 0);
+    TEST_ASSERT_EQUAL_HEX32(J2534_RX_START_OF_MESSAGE | J2534_RX_CAN_29BIT_ID,
+                            m.rx_status);
+    TEST_ASSERT_EQUAL_HEX8(0x18, m.data[0]);
+}
+
+static void test_iso_single_frame_build(void)
+{
+    uint8_t fr[8];
+    const uint8_t req[] = { 0x10, 0x03 };
+    const uint8_t seven[7] = { 1, 2, 3, 4, 5, 6, 7 };
+    const uint8_t eight[8] = { 0 };
+
+    TEST_ASSERT_EQUAL(3, j2534_iso_single_frame(req, 2, false, fr));
+    TEST_ASSERT_EQUAL_HEX8(0x02, fr[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x10, fr[1]);
+    TEST_ASSERT_EQUAL_HEX8(0x03, fr[2]);
+
+    memset(fr, 0, sizeof(fr));
+    TEST_ASSERT_EQUAL(8, j2534_iso_single_frame(req, 2, true, fr));
+    TEST_ASSERT_EQUAL_HEX8(0x02, fr[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xAA, fr[3]);
+    TEST_ASSERT_EQUAL_HEX8(0xAA, fr[7]);
+
+    TEST_ASSERT_EQUAL(8, j2534_iso_single_frame(seven, 7, false, fr));
+    TEST_ASSERT_EQUAL_HEX8(0x07, fr[0]);
+    TEST_ASSERT_EQUAL_HEX8(7, fr[7]);
+    TEST_ASSERT_EQUAL(0, j2534_iso_single_frame(eight, 8, true, fr));
+    TEST_ASSERT_EQUAL(0, j2534_iso_single_frame(eight, 0, true, fr));
+}
+
+static void test_iso_single_frame_parse(void)
+{
+    size_t n = 0;
+    const uint8_t sf[8] = { 0x06, 0x50, 0x03, 0x00, 0x32, 0x01, 0xF4, 0x00 };
+    const uint8_t short_sf[3] = { 0x02, 0x10, 0x03 };
+    const uint8_t ff[8] = { 0x10, 0x14, 0x62, 0xF1, 0x90, 0x31, 0x57, 0x43 };
+    const uint8_t zero[8] = { 0 };
+    const uint8_t cf[8] = { 0x21, 0, 0, 0, 0, 0, 0, 0 };
+
+    TEST_ASSERT_TRUE(j2534_iso_parse_single_frame(sf, 8, &n));
+    TEST_ASSERT_EQUAL(6, n);
+    /* unpadded frames are fine, a length past the DLC is not */
+    TEST_ASSERT_TRUE(j2534_iso_parse_single_frame(short_sf, 3, &n));
+    TEST_ASSERT_EQUAL(2, n);
+    TEST_ASSERT_FALSE(j2534_iso_parse_single_frame(short_sf, 2, &n));
+    /* first and consecutive frames, and an empty single frame, are not */
+    TEST_ASSERT_FALSE(j2534_iso_parse_single_frame(ff, 8, &n));
+    TEST_ASSERT_FALSE(j2534_iso_parse_single_frame(zero, 8, &n));
+    TEST_ASSERT_FALSE(j2534_iso_parse_single_frame(cf, 8, &n));
+    TEST_ASSERT_TRUE(j2534_iso_is_first_frame(ff, 8));
+    TEST_ASSERT_FALSE(j2534_iso_is_first_frame(sf, 8));
+    TEST_ASSERT_FALSE(j2534_iso_is_first_frame(cf, 8));
+    TEST_ASSERT_FALSE(j2534_iso_is_first_frame(ff, 1));
+}
+
+static void test_status_name_exceeded_limit(void)
+{
+    TEST_ASSERT_EQUAL_STRING("ERR_EXCEEDED_LIMIT",
+                             j2534_status_name(J2534_ERR_EXCEEDED_LIMIT));
+}
+
+/* ---- J1850 VPW (legacy, OBD chip) helpers ------------------------------ */
+
+static void test_legacy_split(void)
+{
+    j2534_msg_t m = { 0 };
+    const uint8_t sps[] = { 0x68, 0x6A, 0xF1, 0x22, 0xF1, 0x90 };
+    const uint8_t *hdr = NULL;
+    const uint8_t *pl = NULL;
+    size_t n = 99;
+
+    m.protocol_id = J2534_PROT_J1850VPW;
+    m.data_size = sizeof(sps);
+    memcpy(m.data, sps, sizeof(sps));
+
+    TEST_ASSERT_TRUE(j2534_legacy_split(&m, &hdr, &pl, &n));
+    TEST_ASSERT_EQUAL_HEX8(0x68, hdr[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xF1, hdr[2]);
+    TEST_ASSERT_EQUAL(3, n);
+    TEST_ASSERT_EQUAL_HEX8(0x22, pl[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x90, pl[2]);
+
+    /* header + 1 payload byte is the minimum; header-only is rejected */
+    m.data_size = 4;
+    TEST_ASSERT_TRUE(j2534_legacy_split(&m, &hdr, &pl, &n));
+    TEST_ASSERT_EQUAL(1, n);
+    m.data_size = 3;
+    TEST_ASSERT_FALSE(j2534_legacy_split(&m, &hdr, &pl, &n));
+}
+
+static void test_legacy_header_and_checksum(void)
+{
+    const uint8_t hdr[] = { 0x68, 0x6A, 0xF1 };
+    const uint8_t pay[] = { 0x36, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
+    char out[16];
+
+    TEST_ASSERT_EQUAL(10, j2534_legacy_header_cmd(hdr, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("ATSH686AF1", out);
+    /* too small a buffer is refused, not truncated */
+    TEST_ASSERT_EQUAL(0, j2534_legacy_header_cmd(hdr, out, 10));
+
+    /* additive 16-bit sum: 0x36 + 0+1+2+3+4+5+6 = 0x4B */
+    TEST_ASSERT_EQUAL_HEX16(0x004B, j2534_legacy_checksum(pay, sizeof(pay)));
+    TEST_ASSERT_EQUAL_HEX16(0, j2534_legacy_checksum(NULL, 0));
+}
+
+static void test_legacy_build_request(void)
+{
+    const uint8_t sf[] = { 0x22, 0xF1, 0x90 };
+    const uint8_t seven[] = { 0x3E, 0, 0, 0, 0, 0, 0 };
+    const uint8_t mf[] = { 0x36, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
+    char out[64];
+
+    /* short payload: a bare hex line */
+    TEST_ASSERT_EQUAL(6, j2534_legacy_build_request(sf, 3, J2534_J1850_SF_MAX,
+                                                    out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("22F190", out);
+    /* exactly seven bytes is still a single frame */
+    TEST_ASSERT_EQUAL(14, j2534_legacy_build_request(seven, 7,
+                              J2534_J1850_SF_MAX, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("3E000000000000", out);
+
+    /* eight bytes: VTFullyRequestCk<LLLL><hex><CCCC> for the chip to segment */
+    TEST_ASSERT_TRUE(j2534_legacy_build_request(mf, 8, J2534_J1850_SF_MAX,
+                                                out, sizeof(out)) > 0);
+    TEST_ASSERT_EQUAL_STRING("VTFullyRequestCk00083600010203040506004B", out);
+
+    /* empty payload, and an output buffer too small, are refused */
+    TEST_ASSERT_EQUAL(0, j2534_legacy_build_request(sf, 0, J2534_J1850_SF_MAX,
+                                                    out, sizeof(out)));
+    TEST_ASSERT_EQUAL(0, j2534_legacy_build_request(mf, 8, J2534_J1850_SF_MAX,
+                                                    out, 10));
+}
+
+static void test_legacy_decode_and_status(void)
+{
+    uint8_t out[16];
+
+    /* a reply with headers (ATH1), no spaces */
+    TEST_ASSERT_EQUAL(6, j2534_legacy_decode_line("C4F5D062F190", 12,
+                                                  out, sizeof(out)));
+    TEST_ASSERT_EQUAL_HEX8(0xC4, out[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x90, out[5]);
+    /* spaces are ignored */
+    TEST_ASSERT_EQUAL(3, j2534_legacy_decode_line("48 6B 10", 8,
+                                                  out, sizeof(out)));
+    TEST_ASSERT_EQUAL_HEX8(0x6B, out[1]);
+
+    /* status / error words are not data */
+    TEST_ASSERT_TRUE(j2534_legacy_line_is_status("NO DATA", 7));
+    TEST_ASSERT_TRUE(j2534_legacy_line_is_status("SEARCHING...", 12));
+    TEST_ASSERT_TRUE(j2534_legacy_line_is_status("OK", 2));
+    TEST_ASSERT_TRUE(j2534_legacy_line_is_status("?", 1));
+    TEST_ASSERT_TRUE(j2534_legacy_line_is_status("BUS INIT", 8));
+    TEST_ASSERT_FALSE(j2534_legacy_line_is_status("C4F5D07F3678", 12));
+    TEST_ASSERT_FALSE(j2534_legacy_line_is_status("48 6B 10 41", 11));
+}
+
+static void test_legacy_pending(void)
+{
+    const uint8_t pending[] = { 0xC4, 0xF5, 0xD0, 0x7F, 0x36, 0x78 };
+    const uint8_t final[]   = { 0xC4, 0xF5, 0xD0, 0x76, 0x00, 0x22 };
+    const uint8_t shortmsg[] = { 0xC4, 0xF5, 0xD0 };
+
+    TEST_ASSERT_TRUE(j2534_legacy_is_pending(pending, sizeof(pending)));
+    TEST_ASSERT_FALSE(j2534_legacy_is_pending(final, sizeof(final)));
+    TEST_ASSERT_FALSE(j2534_legacy_is_pending(shortmsg, sizeof(shortmsg)));
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
@@ -387,5 +642,15 @@ void app_main(void)
     RUN_TEST(test_ack_encode_vectors);
     RUN_TEST(test_tcp_gate_predicate);
     RUN_TEST(test_connect_baud_check);
+    RUN_TEST(test_iso_split_layout);
+    RUN_TEST(test_iso_join_and_indication);
+    RUN_TEST(test_iso_single_frame_build);
+    RUN_TEST(test_iso_single_frame_parse);
+    RUN_TEST(test_status_name_exceeded_limit);
+    RUN_TEST(test_legacy_split);
+    RUN_TEST(test_legacy_header_and_checksum);
+    RUN_TEST(test_legacy_build_request);
+    RUN_TEST(test_legacy_decode_and_status);
+    RUN_TEST(test_legacy_pending);
     UNITY_END();
 }

@@ -169,9 +169,11 @@ static uint32_t rd_u32(const uint8_t *p)
 static void periodic_cb(void *arg)
 {
     periodic_t *pm = arg;
+
+    /* a periodic message raises no TxDone indication (SAE J2534-1) */
     if (pm->in_use && j2534_channel_active(pm->slot))
     {
-        (void)j2534_channel_write(pm->slot, &pm->msg);
+        (void)j2534_channel_write_periodic(pm->slot, &pm->msg);
     }
 }
 

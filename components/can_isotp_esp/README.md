@@ -38,8 +38,10 @@ before `uds_manager`/`j2534_server` start; `open()` needs the bus up
 - Per session (heap, freed on close): esp_isotp tx+rx buffers 2 x 4128 B PSRAM
   + its handle ~200 B internal + TX frame pool 16 x ~40 B internal, mailbox
   4 x 4130 B PSRAM, three semaphores ~300 B internal - about 25 KB PSRAM +
-  1.2 KB internal per open session, 5 sessions max (estimated from the
-  allocation sizes; bench PSRAM min_free stayed 3.89 MB with a session open).
+  1.2 KB internal per open session, 9 sessions max (1 UDS + 8 J2534 flow
+  control sessions since 2026-10-19; estimated from the allocation sizes;
+  bench PSRAM min_free stayed 3.89 MB with a session open). Each open
+  session holds one of can_manager's 16 subscriber slots.
 
 ## Design
 
@@ -101,9 +103,13 @@ fail-open (3 s wait, then take), so a wedged side can never brick the other.
   (`CONFIG_ISO_TP_DEFAULT_BLOCK_SIZE` 8, `CONFIG_ISO_TP_DEFAULT_ST_MIN_US`
   1000): `can_isotp_cfg_t.block_size/stmin_ms` are accepted and ignored
   (logged once). Both consumers pass 0/0 today.
-- N_Bs / N_Cr = `CONFIG_ISO_TP_DEFAULT_RESPONSE_TIMEOUT_US` (100 ms).
-- One PDU ≤ `CAN_ISOTP_ESP_MAX_PDU` (4128 B, SAE J2534's cap); 5 sessions
-  (1 UDS + the 4 J2534 channels); a rx id can have one session at a time.
+- N_Bs / N_Cr = `CONFIG_ISO_TP_DEFAULT_RESPONSE_TIMEOUT_US` (1000 ms since
+  2026-10-19, ISO 15765-2's value; 100 ms before). The task polls a session
+  at tick cadence for 1.2 s after any activity so the stack's timeout is
+  always observed.
+- One PDU ≤ `CAN_ISOTP_ESP_MAX_PDU` (4128 B, SAE J2534's cap); 9 sessions
+  (1 UDS + 8 J2534 flow-control sessions, up to 4 per J2534 channel); a
+  rx id can have one session at a time.
 - 29-bit ids through `ext_id`; padding per session (`use_padding`,
   `padding_byte`).
 
