@@ -896,10 +896,26 @@ profile, and the client PUTs the converted table to
 firmware never fetches profiles. **Two conversion rules the importer
 MUST apply** (bench-verified against the published MEB profile):
 
-1. **Byte-index shift**: published profile expressions index the
-   legacy frame WITH its PCI byte (`010C` RPM = `[B3:B4]`); the v6
-   payload starts at the service echo (B0 = 0x41/0x62): shift every
-   `B<n>`/`S<n>` index DOWN BY ONE (`[B2:B3]`).
+1. **Byte-index shift, right for single-frame replies only (bench-measured
+   2026-10-21)**: published profile expressions index the legacy frame of
+   reference, every byte after the CAN header with the PCI bytes included
+   (`parse_elm327_response()` in the legacy main/autopid.c): a single-frame
+   reply is `0L 41 05 xx` (`010C` RPM = `[B3:B4]`), a multi-frame reply
+   `10 LL 61 01 d0..d3 / 21 d4..d10 / 22 ..` (the Leaf ZE1's SOC reads
+   `B39` and `B41:B42`, skipping `B40`, the PCI of the fifth consecutive
+   frame). The v6 payload is the PCI-free assembly starting at the service
+   echo (B0 = 0x41/0x62), so the importer's shift of every `B<n>`/`S<n>`
+   index DOWN BY ONE (`[B2:B3]`) is right for a single-frame reply and
+   WRONG for a multi-frame one: the first frame's indexes land two too
+   high, every consecutive frame's one more. `tools/testbench/obd/
+   autopid_profile_e2e_bench.py` measured it on the Leaf ZE1 profile
+   (its four multi-frame PIDs decode exactly the shifted expression on
+   the PCI-free payload, the two single-frame ones decode right). Of the
+   370 published PIDs, 143 carry no response-count hint and index bytes
+   below 8 only, so an importer-side remap would guess for them; the
+   runner rebuilding the legacy frame view for imported rows from the
+   reply it actually got would not. Fix pending: `internal/
+   TASK_profile_frame_ref.md` in the app repo.
 2. **Cross-type inits need no restoring prelude any more** (2026-10-20,
    issue #964): a specific PID whose init switches protocol/headers/CRA
    (`ATSP7;…;ATCRA…`) leaves the chip there, and the runner itself puts
@@ -913,6 +929,26 @@ MUST apply** (bench-verified against the published MEB profile):
    `HV_C_V_168` twice (2026-09-16), so the importer renames a repeat
    (`_2`, `_3` …, against the std/custom parameters already loaded)
    and tells the user instead of failing the import.
+4. **Passive filters (2026-10-21)**: a profile's `filters` (the Leaf ZE1
+   profile is the first published one) go to the table's `filters`: the
+   frame id read like JS `Number()` (`"0x284"` is 644), `monitor_ms` as
+   published (default 1000), `period_ms` 0 (the group's), group
+   `default`, tagged `profile: true` so that the next import replaces
+   them and hand-made filters stay; their expressions are NOT shifted (a
+   filter indexes the frame data, B0 = first data byte, in both frames of
+   reference). Bench-proven on the Leaf ZE1 profile: SPEED, the signed
+   DM_F_RPM and ODOMETER decoded exactly from frames broadcast on 0x284,
+   0x1DA and 0x5C5.
+
+**Replies over 16 rows are assembled in the wrong order (found
+2026-10-21):** the chip prints ISO-TP row indexes `0:` to `F:` and wraps;
+`assemble_headerless()` in autopid_resp.c concatenates the rows by that
+printed index, so the rows 16 and up of a reply interleave with 0 and up.
+The Leaf ZE1's 28-row cell-voltage DID `2102` decodes exactly the shifted
+expression on that re-ordered payload (54 of 54 values); the Toyota bZ4X
+`22181A2` and the Xpeng `221122` are the two other published replies over
+16 rows. Fix pending with the index rule above (rows in arrival order,
+the printed index only to detect a gap).
 
 `POST /api/autopid/test` = try a profile PID before saving (same
 runner path: init chain, rxheader, expression, see HTTP_API §6e4).
@@ -927,6 +963,13 @@ or a negative response (`7F 22 31`) is visible instead of a bare NO DATA.
 published profile through this conversion (→ `AUTOPID PROFILE PASS`)
 and polls a 24-parameter PID on the simulator: the regression for the
 16-parameter cap and the duplicate-name typo.
+`tools/testbench/obd/autopid_profile_e2e_bench.py` (2026-10-21,
+`.\test.ps1 profilee2e`) plays ONE profile's ECU on the PCAN from the
+profile itself (`actors/pcan_profile_ecu.py`: every request answered with
+reply bytes the bench chose, every filter frame broadcast) and checks
+every value the device publishes against what the profile's expressions
+mean in the published frame of reference (→ `AUTOPID PROFILE E2E PASS`);
+it is what found the two defects above.
 
 ## Tests
 
