@@ -80,7 +80,9 @@ Decisions log there is authoritative; the big ones:
 | `autopid_poller.c` / `autopid_poller.h` | the poller task (PSRAM stack, notify-driven): pauses, DTC due-check, scheduler -> runner -> bookkeeping (split out of autopid.c 2026-10-02) |
 | `autopid_bus_guard.c` | PURE bus guard: the bitrate a chip protocol transmits at, and the verdict (`allow` / `search` / `park`) for what the native controller heard on the bus, with its one-sentence reason (see "Bus guard" below) |
 | `autopid_guard.c` | the guard's glue: asks `can_manager` what is on the bus before the chip talks (a held listen-only watch until the bitrate is proven), parks the poller, refuses the one-shot jobs, `bus_guard{}` in `GET /api/autopid` |
-| `autopid_runner.c` | the chip-facing poll: type/per-PID init transitions, ATCRA rxheader, request, parse, cross-talk guard; the chip baseline (prelude) and the borrowed-header rule (a standard row that set its own `ATSH` gives the functional header back before a row that sets none); the bus guard's word on the protocols the tables set (`row_pins_ok()`) and the prelude behind a reset inside a chain (`after_reset()`) |
+| `autopid_runner.c` | the chip-facing poll and the test-a-PID one-shot: type/per-PID init transitions, ATCRA rxheader, request, parse, cross-talk guard; the bus guard's word on the protocols the tables set (`row_pins_ok()`) |
+| `autopid_baseline.c` / `autopid_runner_private.h` | the chip baseline (out of `autopid_runner.c` 2026-10-20, 700-line rule): the prelude, the chain sender with the prelude behind a reset inside a chain (`after_reset()`), the memory the poll and the test share (`ap_base_mem()`), the borrowed-header rule (a standard row that set its own `ATSH` gives the functional header back before a row that sets none) and **the baseline back before the next row type** when a chain of the tables moved the chip (`ap_base_restore()`, issue #964, see "The baseline back" below) |
+| `autopid_chain.c` | PURE (2026-10-20, issue #964): what a `;`-separated chain of the tables sets on the chip beyond the baseline (`ap_chain_sets()`: header, receive filter, extended addressing, flow control, protocol, print format, adaptive timing, ...; read as the chip reads it) and the chain that puts the baseline back (`ap_chain_restore()`: the prelude plus one undo command per thing the prelude does not cover, `ATCEA`, `ATFCSM0`, `ATAT1`, ...) |
 | `autopid_publish.c` | `ap_runner_publish()` = the publish half of a poll (mux, expression, clamp, cache, events), shared by the chip runner and the J1939 runner (out of `autopid_runner.c` 2026-10-05, 700-line rule) |
 | `autopid_transcript.c` | pure: the test-a-PID transcript, one line per exchange (`ap_tr_add()`; out of `autopid_runner.c` 2026-10-05, 700-line rule) |
 | `autopid_runner_j1939.c` | the passive runner (2026-10-03, see "J1939 rows"): a `PGN:` row read from the J1939 listener's store, published when the store holds a message the row has not published yet, stamped with the message's own time; the test-a-PID path for a PGN command |
@@ -452,9 +454,32 @@ bitmap has the PID. Why physical and not functional + `rxheader`:
 gives the functional one back: before any row that does not set one (a
 custom row, a specific row, a standard row added by hand), the runner sends
 `ATSH7DF` / `ATSH18DB33F1` again, so such a row finds the same baseline as
-on an OBD-II car. Only standard rows are tracked. A header set by a custom
-or specific init stays in effect as it always did. Test-a-PID follows the
-same rule, and every DTC job starts from the whole prelude.
+on an OBD-II car. Within a type a header set by a custom or specific init
+stays in effect as it always did. Test-a-PID follows the same rule, and
+every DTC job starts from the whole prelude.
+
+**The baseline back (2026-10-20, issue #964).** A chain of the tables (a
+type's init, a row's init, an AT command as a row's `cmd`) can move the chip
+much further than the header: a 2018 BMW 640i GT's custom odometer row
+(`ATSH6F1;ATCEA60;ATCRA660;ATFCSH6F1;ATFCSD60300000;ATFCSM1`) left the chip
+on the gateway behind extended addressing with the receive filter on it, so
+every Mode 01 row that followed went to the gateway, which answered
+`7F 01 11`, and the values froze (on the legacy firmware decoded as RPM
+68.25, speed 1, coolant -39; on v6 the rows fail and the values stop
+moving: nine rows frozen from the second cycle on the bench). The runner
+reads every chain it sends for what it sets beyond the baseline
+(`ap_chain_sets()`, pure) and before the next row TYPE puts the baseline
+back: the prelude (`ATS1;ATH0;ATST96;ATTP<p>;ATSH7DF;ATCRA`) plus one undo
+command per thing the prelude does not cover (`ATCEA` for extended
+addressing, `ATFCSM0` for flow control, `ATAT1`, `ATCAF1`, `ATCP18`, `ATE0`,
+`ATL0`, `ATR1`, `ATV0;ATD0`), then the new type's init and the row's init as
+before. Within a type nothing changes: a row finds what the rows before it
+set. The same happens in test-a-PID (the transcript shows the restore) and
+at the first poll after a test. Cost: one restore per type transition that
+follows a moving chain (eight commands for the BMW row, about 60 ms).
+Bench: `tools/testbench/obd/autopid_init_leak_bench.py` (`AUTOPID INIT LEAK
+PASS`, the ECU simulator as the car plus `actors/pcan_ext_addr_ecu.py` as
+the extended-addressed gateway on the PCAN).
 
 **Contact.** The chip's own protocol search (`ATTP0`) asks `0100`: it
 cannot find a `uds` car, and it needs 9.3 s to say `UNABLE TO CONNECT`. So
@@ -849,11 +874,12 @@ MUST apply** (bench-verified against the published MEB profile):
    legacy frame WITH its PCI byte (`010C` RPM = `[B3:B4]`); the v6
    payload starts at the service echo (B0 = 0x41/0x62): shift every
    `B<n>`/`S<n>` index DOWN BY ONE (`[B2:B3]`).
-2. **Cross-type inits must be self-sufficient**: a specific PID whose
-   init switches protocol/headers/CRA (`ATSP7;…;ATCRA…`) leaves the
-   chip there: if standard PIDs are polled too, give `std_init` a
-   restoring prelude (`ATSP6;ATCRA;ATH0`) so each type transition
-   re-establishes its world.
+2. **Cross-type inits need no restoring prelude any more** (2026-10-20,
+   issue #964): a specific PID whose init switches protocol/headers/CRA
+   (`ATSP7;…;ATCRA…`) leaves the chip there, and the runner itself puts
+   the baseline back before the next row type ("The baseline back"
+   above). A `std_init` that pins the protocol (`ATSP6;ATCRA;ATH0`, the
+   old advice) still works; it is sent on top of the restored baseline.
 3. **Parameter names must be unique across the whole table** (the
    value cache and every API key on them; the firmware refuses the
    table with `duplicate parameter name 'X'`). Profiles are community
@@ -878,7 +904,7 @@ and polls a 24-parameter PID on the simulator: the regression for the
 
 ## Tests
 
-`host_test/` (run: `.\test.ps1 host autopid`, 129 tests): the detection's rows as a new car's tables, on or off (`test_scan_rows.c`, 3 cases, 2026-10-09); the J1939 rows
+`host_test/` (run: `.\test.ps1 host autopid`, 133 tests): what a chain of the tables sets on the chip and the chain that puts the baseline back (`test_chain.c`, 4 cases, 2026-10-20: the BMW row of issue #964, the published i3 / Mini / e-Ulysse chains, the off and reset forms set nothing, every undo command fits `AP_RESTORE_LEN`); the detection's rows as a new car's tables, on or off (`test_scan_rows.c`, 3 cases, 2026-10-09); the J1939 rows
 (`test_j1939_rows.c`, 10 cases: the `PGN:` grammar and its refusals, the
 config parser's typed fields and the `init` / `rxheader` refusal, the
 scheduler's class-masked pick and the 20 ms passive floor, the built-in

@@ -7,7 +7,7 @@ store's `autopid_vehicle_index.c` + `autopid_vehicle_codec.c` with
 `test_vehicle_index.c`, compiled with `AUTOPID_HOST_TEST`: no chip, no
 filesystem). Run via `.\test.ps1 host autopid`.
 
-## What is covered (80 tests, 2026-10-01)
+## What is covered (133 tests, 2026-10-20)
 
 | Case | What it proves |
 |---|---|
@@ -59,10 +59,14 @@ filesystem). Run via `.\test.ps1 host autopid`.
 | store: vehicles.json round trip | every field survives (escaped name, `current` as a key, no per-entry `current` flag in the file), an empty index, a too-small buffer |
 | store: full index fits | 8 cars with every string at its cap and 8 responders each fit `AP_VEH_INDEX_JSON_MAX` (prints the size) |
 | store: load bounds | garbage / array / no version / version 2 / NULL rejected; no `vehicles` = empty; entries without a key dropped, duplicates dropped, keys derived or re-derived, bad VIN/protocol sanitized (`a` upcased), out-of-range numbers zeroed, the 9th+ entry dropped |
+| **chain: the report (#964)** | the BMW odometer row's init `ATSH6F1;ATCEA60;ATCRA660;ATFCSH6F1;ATFCSD60300000;ATFCSM1` sets header, filter, extended address and flow control; the restore is the prelude + `ATCEA;ATFCSM0` |
+| chain: published profiles | the i3 (`ATAT0` too: `ATAT1` comes back), Mini (`ATSP6;ATS0`: protocol + print), e-Ulysse chains and a uds car's `ATSH18DA58F1` classify as documented |
+| chain: read like the chip | spaces and case ignored; the off / reset forms (`ATCEA`, `ATCRA`, `ATFCSM0`, `ATCAF1`, `ATH0`...) set nothing; the on forms do; resets, displays, reads, requests, junk and NULL set nothing; an overlong command is nobody's |
+| chain: the restore builds | prelude alone when it covers everything; every bit at once fits `AP_RESTORE_LEN`; no prelude = the undo commands alone; a short buffer is cut and terminated |
 
 ## Expected result
 
 ```
-80 Tests 0 Failures 0 Ignored
+133 Tests 0 Failures 0 Ignored
 OK
 ```

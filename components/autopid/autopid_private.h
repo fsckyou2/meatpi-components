@@ -46,7 +46,7 @@ extern "C" {
 #define AP_PARAMS_PER   256    /* per PID/filter: published vehicle
                                   profiles decode up to 192 values from ONE
                                   DID (Xpeng cell voltages; Hyundai/Kia BMS
-                                  DIDs carry 20–32), so 16 rejected every
+                                  DIDs carry 20 to 32), so 16 rejected every
                                   Hyundai/Kia/Genesis/Xpeng profile
                                   (2026-09-16). Sizes the poller's PSRAM
                                   copy + the filter frame slots, never a
@@ -63,6 +63,8 @@ extern "C" {
 
 #define AP_PAYLOAD_MAX  128    /* assembled response payload bytes          */
 #define AP_RESP_MAX     1024   /* raw chip response text                    */
+#define AP_RESTORE_LEN  128    /* the baseline prelude + every undo command
+                                  (ap_chain_restore: 107 chars at most)     */
 
 typedef enum
 {
@@ -298,7 +300,8 @@ void ap_events_scan_done(uint16_t found);
 void ap_events_vehicle_changed(const char *vin, const char *name, bool known);
 void ap_events_vehicle_evicted(const char *vin, const char *name); /* store */
 
-/* chip-facing runner (autopid_runner.c: poller-task context) */
+/* chip-facing runner (autopid_runner.c: poller-task context; the baseline
+   half, prelude / restore / send_init, in autopid_baseline.c) */
 bool ap_runner_run(const ap_pid_t *pid, int pid_index,
                    const ap_param_t *params);
 /** The publish half of a poll, shared with the J1939 runner: every enabled
@@ -455,6 +458,40 @@ char *ap_config_repair_names(const char *json, int *renamed);
  *  driver's guard (obd_chip_guard.h), which also names the commands
  *  with no RAM twin (ATPP/ATSD/ATCV/STWBR): config parse refuses those. */
 void ap_init_sanitize(char *str);
+
+/* ---- pure: what a chain of the tables sets on the chip (autopid_chain.c,
+ * host-tested). Issue #964: a custom row's init moved the chip to a BMW
+ * gateway (ATSH6F1;ATCEA60;ATCRA660;ATFCSM1...) and the standard rows that
+ * followed went there too. The runner restores the baseline before the next
+ * row type when a chain moved any of this. ---------------------------------- */
+#define AP_SETS_HEADER    (1u << 0)  /* ATSH: the prelude's functional header */
+#define AP_SETS_FILTER    (1u << 1)  /* ATCRA / ATCM / ATCF: the prelude's ATCRA */
+#define AP_SETS_PROTOCOL  (1u << 2)  /* ATSP / ATTP: the prelude's ATTP<p>  */
+#define AP_SETS_PRINT     (1u << 3)  /* ATH1 / ATS0 / ATST: ATH0 ATS1 ATST96 */
+#define AP_SETS_EXT_ADDR  (1u << 4)  /* ATCEA / ATCER -> ATCEA              */
+#define AP_SETS_FLOW_CTL  (1u << 5)  /* ATFCSH / ATFCSD / ATFCSM -> ATFCSM0 */
+#define AP_SETS_FC_OFF    (1u << 6)  /* ATCFC0 -> ATCFC1                    */
+#define AP_SETS_TIMING    (1u << 7)  /* ATAT0 / ATAT2 -> ATAT1              */
+#define AP_SETS_RAW       (1u << 8)  /* ATCAF0 -> ATCAF1                    */
+#define AP_SETS_PRIORITY  (1u << 9)  /* ATCP -> ATCP18                      */
+#define AP_SETS_ECHO      (1u << 10) /* ATE1 -> ATE0                        */
+#define AP_SETS_LINEFEED  (1u << 11) /* ATL1 -> ATL0                        */
+#define AP_SETS_QUIET     (1u << 12) /* ATR0 -> ATR1                        */
+#define AP_SETS_DLC       (1u << 13) /* ATV1 / ATD1 -> ATV0 ATD0            */
+
+/** The AP_SETS_* bits a ';'-separated chain (a type's or a row's init, an
+ *  AT command as a row's cmd) sets on the chip beyond the baseline. Read as
+ *  the chip reads it: spaces ignored, any case; a command the table does not
+ *  know sets nothing; a bare `ATCEA` / `ATCRA` (the off / reset forms) set
+ *  nothing. NULL or no AT command = 0. */
+unsigned ap_chain_sets(const char *chain);
+
+/** The chain that puts the baseline back for @p sets: @p prelude (which
+ *  covers header, filter, protocol and print format) followed by one undo
+ *  command per remaining bit (`;ATCEA;ATFCSM0;...`). @return the length
+ *  written (cap - 1 when it did not fit: AP_RESTORE_LEN always does). */
+size_t ap_chain_restore(unsigned sets, const char *prelude, char *out,
+                        size_t cap);
 
 /* ---- pure: bus guard (autopid_bus_guard.c, host-tested) -------------------
  * May the OBD chip transmit on a protocol, given what the native

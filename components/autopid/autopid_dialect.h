@@ -143,7 +143,8 @@ bool ap_dialect_request_id(uint32_t responder, uint32_t *request);
 size_t ap_dialect_header_cmd(uint32_t responder, char *out, size_t cap);
 
 /** Does a ';'-separated init chain set the request header (ATSH)?
- *  Case-insensitive, spaces ignored ("at sh 7e0"). */
+ *  Case-insensitive, spaces ignored ("at sh 7e0"): the AP_SETS_HEADER bit
+ *  of ap_chain_sets() (autopid_chain.c). */
 bool ap_dialect_init_sets_header(const char *init);
 
 /**

@@ -574,44 +574,9 @@ size_t ap_dialect_header_cmd(uint32_t responder, char *out, size_t cap)
 
 bool ap_dialect_init_sets_header(const char *init)
 {
-    static const char WANT[] = "ATSH";
-    bool at_start = true;       /* still inside a command's first chars */
-    size_t m = 0;
-
-    for (const char *p = init; p != NULL && *p != '\0'; p++)
-    {
-        char c = (char)toupper((unsigned char)*p);
-
-        if (c == ' ' || c == '\t')
-        {
-            continue;
-        }
-
-        if (c == ';')
-        {
-            at_start = true;
-            m = 0;
-            continue;
-        }
-
-        if (!at_start)
-        {
-            continue;
-        }
-
-        if (c != WANT[m])
-        {
-            at_start = false;   /* another command: wait for the next ';' */
-            continue;
-        }
-
-        if (++m == sizeof(WANT) - 1)
-        {
-            return true;
-        }
-    }
-
-    return false;
+    /* the chain reader of autopid_chain.c (issue #964) knows every command
+       the tables move the chip with; the header is one of its bits */
+    return (ap_chain_sets(init) & AP_SETS_HEADER) != 0;
 }
 
 int ap_dialect_can_candidates(const ap_bus_t *bus,
