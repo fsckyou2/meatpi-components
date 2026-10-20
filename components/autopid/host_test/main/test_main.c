@@ -34,6 +34,8 @@ void run_names_tests(void);
 void run_scan_rows_tests(void);
 /* test_chain.c: what a chain of the tables sets on the chip, the restore */
 void run_chain_tests(void);
+/* test_bounds.c: a parameter's min / max on a decoded value (issue #1004) */
+void run_bounds_tests(void);
 
 /* ---- helpers ----------------------------------------------------------------- */
 
@@ -2070,6 +2072,7 @@ void app_main(void)
     run_j1939_rows_tests();
     run_scan_rows_tests();
     run_chain_tests();
+    run_bounds_tests();
 
     UNITY_END();
 }

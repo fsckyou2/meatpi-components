@@ -7,7 +7,7 @@ store's `autopid_vehicle_index.c` + `autopid_vehicle_codec.c` with
 `test_vehicle_index.c`, compiled with `AUTOPID_HOST_TEST`: no chip, no
 filesystem). Run via `.\test.ps1 host autopid`.
 
-## What is covered (133 tests, 2026-10-20)
+## What is covered (137 tests, 2026-10-20)
 
 | Case | What it proves |
 |---|---|
@@ -63,10 +63,14 @@ filesystem). Run via `.\test.ps1 host autopid`.
 | chain: published profiles | the i3 (`ATAT0` too: `ATAT1` comes back), Mini (`ATSP6;ATS0`: protocol + print), e-Ulysse chains and a uds car's `ATSH18DA58F1` classify as documented |
 | chain: read like the chip | spaces and case ignored; the off / reset forms (`ATCEA`, `ATCRA`, `ATFCSM0`, `ATCAF1`, `ATH0`...) set nothing; the on forms do; resets, displays, reads, requests, junk and NULL set nothing; an overlong command is nobody's |
 | chain: the restore builds | prelude alone when it covers everything; every bit at once fits `AP_RESTORE_LEN`; no prelude = the undo commands alone; a short buffer is cut and terminated |
+| **bounds: the report (#1004)** | 0xFF through `B2*0.3921568692` (100.000001646) against a max of 100 is clamped to 100 on a standard and on a custom row; the reporter's 100.00000076 clamps, 99.99999823 is kept, 101.2 drops on a custom row and clamps on a standard one |
+| bounds: the rule | no bounds keeps everything; on the bound kept; the tolerance is 1e-6 of the bound (1e-6 at least) both ways; a J1939 not-available raw drops; a standard row clamps both ways; NaN never reaches the cache |
+| bounds: the exact literal | a percent row's full scale is the ratio `B2*100/255` (`[B2:B3]*25700/65535`, shifted `B3*100/255`), RPM / offset / fuel-trim / unranged rows keep the decimal, a range below zero is the signed span `[S2:S3]*0.25`; the ratio decodes exactly through the real parser |
+| bounds: the whole table | every ranged SAE row decoded at 0x00 / 0xFF / 0x7F / 0x80 through the real parser lands inside its own range (135 rows) |
 
 ## Expected result
 
 ```
-133 Tests 0 Failures 0 Ignored
+137 Tests 0 Failures 0 Ignored
 OK
 ```

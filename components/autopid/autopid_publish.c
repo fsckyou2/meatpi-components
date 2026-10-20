@@ -24,9 +24,10 @@
  * @file autopid_publish.c
  * @brief The publish half of a poll: every enabled parameter of a row
  *        evaluated over ONE payload (mux precondition, expression,
- *        plausibility clamp) into the cache and the events. Shared by the
- *        chip runner and the J1939 runner. Moved out of autopid_runner.c
- *        2026-10-05 (700-line rule); unchanged.
+ *        the bounds) into the cache and the events. Shared by the chip
+ *        runner and the J1939 runner. Moved out of autopid_runner.c
+ *        2026-10-05 (700-line rule). The bounds rule is
+ *        autopid_bounds.c's (issue #1004, 2026-10-20).
  */
 #include <math.h>
 
@@ -84,10 +85,16 @@ bool ap_runner_publish(const ap_pid_t *pid, const ap_param_t *params,
             continue;
         }
 
-        /* plausibility clamp: out-of-range readings are dropped, not
-           published (mirrors legacy min/max) */
-        if ((!isnan(prm->min) && value < prm->min) ||
-            (!isnan(prm->max) && value > prm->max))
+        /* the bounds (autopid_bounds.c, issue #1004): float noise is
+           clamped away for every row; beyond the tolerance a standard
+           OBD row clamps to the table's range (legacy parity), a custom,
+           specific or J1939 row drops the reading (its bounds filter:
+           a profile's SOC max 100 against a raw 0xFF, J1939's FF.. not
+           available) */
+        bool clamps = (pid->type == AP_PID_STD) && !pid->j1939;
+
+        if (ap_bounds_apply(&value, prm->min, prm->max, clamps) ==
+            AP_BOUNDS_DROPPED)
         {
             ESP_LOGD(TAG, "%s/%s: %f out of range", pid->name, prm->name,
                      value);

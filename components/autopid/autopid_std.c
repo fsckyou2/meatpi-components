@@ -71,17 +71,60 @@ static void fmt_literal(double v, char *out, size_t len)
     }
 }
 
+/**
+ * The literal of @p scale. The ratio of two integers `N/D` when the row's
+ * @p max is the value at full scale (every raw bit set, within float noise)
+ * and N = max - offset is an integer: full scale then decodes to max
+ * EXACTLY. The table's scales are floats printed with ten digits: a percent
+ * row's 0.3921568627f prints as 0.3921568692 and a raw 0xFF decoded to
+ * 100.000001646, a hair above the row's max (issue #1004); `B2*100/255`
+ * decodes it to 100. Otherwise the decimal literal. @return true for the
+ * ratio form.
+ */
+static bool scale_literal(double scale, double offset, int bits, double max,
+                          char *out, size_t len)
+{
+    double raw_max = ldexp(1.0, bits) - 1.0;
+    double full = raw_max * scale + offset;
+    double n = max - offset;
+    double tol = fabs(max) * AP_BOUNDS_TOL_REL;
+
+    if (tol < AP_BOUNDS_TOL_ABS)
+    {
+        tol = AP_BOUNDS_TOL_ABS;
+    }
+
+    if (!isnan(max) && scale != 1.0 && fabs(full - max) <= tol && n > 0 &&
+        fabs(n - nearbyint(n)) < 1e-9)
+    {
+        snprintf(out, len, "%.0f/%.0f", nearbyint(n), raw_max);
+        return true;
+    }
+
+    fmt_literal(scale, out, len);
+    return false;
+}
+
 esp_err_t ap_std_expression(uint8_t bit_start, uint8_t bit_length,
                             double scale, double offset, char *buf,
                             size_t buf_len)
 {
-    return ap_std_expression_shift(bit_start, bit_length, scale, offset, 0,
-                                   buf, buf_len);
+    return ap_std_expression_bounded(bit_start, bit_length, scale, offset,
+                                     NAN, NAN, 0, buf, buf_len);
 }
 
 esp_err_t ap_std_expression_shift(uint8_t bit_start, uint8_t bit_length,
                                   double scale, double offset, int shift,
                                   char *buf, size_t buf_len)
+{
+    return ap_std_expression_bounded(bit_start, bit_length, scale, offset,
+                                     NAN, NAN, shift, buf, buf_len);
+}
+
+esp_err_t ap_std_expression_bounded(uint8_t bit_start, uint8_t bit_length,
+                                    double scale, double offset, double min,
+                                    double max, int shift, char *buf,
+                                    size_t buf_len)
 {
     if (buf == NULL || buf_len == 0 || shift < 0)
     {
@@ -99,19 +142,26 @@ esp_err_t ap_std_expression_shift(uint8_t bit_start, uint8_t bit_length,
     int count = (bit_length + 7) / 8;
     char base[32];
 
+    /* a range below zero with no offset is a two's complement raw (the
+       evaporative system vapour pressure, -8192..8192 kPa at 0.25 per
+       bit): the parser's signed span, else the plain bytes */
+    char kind = (!isnan(min) && min < 0.0 && offset == 0.0) ? 'S' : 'B';
+
     if (count == 1)
     {
-        snprintf(base, sizeof(base), "B%d", first);
+        snprintf(base, sizeof(base), "%c%d", kind, first);
     }
     else
     {
-        snprintf(base, sizeof(base), "[B%d:B%d]", first, first + count - 1);
+        snprintf(base, sizeof(base), "[%c%d:%c%d]", kind, first, kind,
+                 first + count - 1);
     }
 
     /* value = raw * scale + offset */
     char sc[32], of[32];
 
-    fmt_literal(scale, sc, sizeof(sc));
+    (void)scale_literal(scale, offset, bit_length, (kind == 'B') ? max : NAN,
+                        sc, sizeof(sc));
     fmt_literal(fabs(offset), of, sizeof(of));
 
     int n;
@@ -363,10 +413,18 @@ bool ap_std_entry_to_json(cJSON *arr, uint8_t pid, ap_dialect_t dialect,
         const std_parameter_t *prm = &info->params[i];
         char expr[AP_EXPR_LEN];
 
+        /* the row's max makes a percent row's full scale decode to exactly
+           max (`B2*100/255`, issue #1004); a row without a range (0, 0)
+           gets the plain literal */
+        bool ranged = !(prm->min == 0.0f && prm->max == 0.0f);
+
         if (prm->name == NULL ||
-            ap_std_expression_shift(prm->bit_start, prm->bit_length,
-                                    (double)prm->scale, (double)prm->offset,
-                                    shift, expr, sizeof(expr)) != ESP_OK)
+            ap_std_expression_bounded(prm->bit_start, prm->bit_length,
+                                      (double)prm->scale,
+                                      (double)prm->offset,
+                                      ranged ? (double)prm->min : NAN,
+                                      ranged ? (double)prm->max : NAN,
+                                      shift, expr, sizeof(expr)) != ESP_OK)
         {
             continue;   /* placeholder row */
         }

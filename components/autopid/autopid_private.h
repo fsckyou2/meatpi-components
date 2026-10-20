@@ -426,6 +426,18 @@ esp_err_t ap_std_expression_shift(uint8_t bit_start, uint8_t bit_length,
                                   double scale, double offset, int shift,
                                   char *buf, size_t buf_len);
 
+/** The mapping with the row's range (@p min / @p max, NAN = none): when
+ *  max is the value at full scale within float noise the scale is written
+ *  as the ratio of two integers (`B2*100/255`), so a full-scale raw decodes
+ *  to max EXACTLY (issue #1004: the table's float scale printed as
+ *  0.3921568692 decoded 0xFF to 100.000001646, above the max of 100); a
+ *  range below zero with no offset reads the raw as two's complement
+ *  (`[S2:S3]*0.25`). */
+esp_err_t ap_std_expression_bounded(uint8_t bit_start, uint8_t bit_length,
+                                    double scale, double offset, double min,
+                                    double max, int shift, char *buf,
+                                    size_t buf_len);
+
 /** OR-merge every "41 <pid> A B C D" line of @p resp (headers on or off,
  *  multi-ECU) into @p bitmap. True when at least one row matched. PURE. */
 bool ap_std_scan_parse(const char *resp, uint8_t expect_pid,
@@ -458,6 +470,29 @@ char *ap_config_repair_names(const char *json, int *renamed);
  *  driver's guard (obd_chip_guard.h), which also names the commands
  *  with no RAM twin (ATPP/ATSD/ATCV/STWBR): config parse refuses those. */
 void ap_init_sanitize(char *str);
+
+/* ---- pure: a parameter's min / max applied to a decoded value
+ * (autopid_bounds.c, host-tested). Issue #1004: a full tank decoded to
+ * 100.000001646 against a max of 100 and was dropped. Float noise never
+ * drops a reading; beyond the tolerance a standard OBD row clamps (the
+ * table's range is its display range, legacy parity), every other row
+ * drops (the bounds of a custom, specific or J1939 row are a filter). ---- */
+#define AP_BOUNDS_TOL_REL 1e-6   /* of the bound's magnitude: 100 -> 1e-4   */
+#define AP_BOUNDS_TOL_ABS 1e-6   /* the floor, for the bounds around zero    */
+
+typedef enum
+{
+    AP_BOUNDS_KEPT = 0,   /* inside the bounds: the value as decoded       */
+    AP_BOUNDS_CLAMPED,    /* beyond a bound, set to it                     */
+    AP_BOUNDS_DROPPED,    /* beyond a bound and the row filters: not cached */
+} ap_bounds_verdict_t;
+
+/** Apply @p min / @p max (NAN = none) to @p value: within the tolerance of
+ *  a bound the value is clamped to it; beyond it, clamped when
+ *  @p clamp_beyond (a standard OBD row), dropped otherwise. A NaN value is
+ *  dropped. */
+ap_bounds_verdict_t ap_bounds_apply(double *value, float min, float max,
+                                    bool clamp_beyond);
 
 /* ---- pure: what a chain of the tables sets on the chip (autopid_chain.c,
  * host-tested). Issue #964: a custom row's init moved the chip to a BMW

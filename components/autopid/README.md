@@ -83,7 +83,8 @@ Decisions log there is authoritative; the big ones:
 | `autopid_runner.c` | the chip-facing poll and the test-a-PID one-shot: type/per-PID init transitions, ATCRA rxheader, request, parse, cross-talk guard; the bus guard's word on the protocols the tables set (`row_pins_ok()`) |
 | `autopid_baseline.c` / `autopid_runner_private.h` | the chip baseline (out of `autopid_runner.c` 2026-10-20, 700-line rule): the prelude, the chain sender with the prelude behind a reset inside a chain (`after_reset()`), the memory the poll and the test share (`ap_base_mem()`), the borrowed-header rule (a standard row that set its own `ATSH` gives the functional header back before a row that sets none) and **the baseline back before the next row type** when a chain of the tables moved the chip (`ap_base_restore()`, issue #964, see "The baseline back" below) |
 | `autopid_chain.c` | PURE (2026-10-20, issue #964): what a `;`-separated chain of the tables sets on the chip beyond the baseline (`ap_chain_sets()`: header, receive filter, extended addressing, flow control, protocol, print format, adaptive timing, ...; read as the chip reads it) and the chain that puts the baseline back (`ap_chain_restore()`: the prelude plus one undo command per thing the prelude does not cover, `ATCEA`, `ATFCSM0`, `ATAT1`, ...) |
-| `autopid_publish.c` | `ap_runner_publish()` = the publish half of a poll (mux, expression, clamp, cache, events), shared by the chip runner and the J1939 runner (out of `autopid_runner.c` 2026-10-05, 700-line rule) |
+| `autopid_publish.c` | `ap_runner_publish()` = the publish half of a poll (mux, expression, the bounds, cache, events), shared by the chip runner and the J1939 runner (out of `autopid_runner.c` 2026-10-05, 700-line rule) |
+| `autopid_bounds.c` | PURE (2026-10-20, issue #1004): a parameter's `min` / `max` applied to one decoded value (`ap_bounds_apply()`): float noise never drops a reading (a value beyond a bound by at most 1e-6 of it is clamped to the bound), beyond that a standard OBD row clamps to the table's range (its display range, legacy parity) and a custom, specific or J1939 row drops the reading (its bounds are a filter), see "The bounds" below |
 | `autopid_transcript.c` | pure: the test-a-PID transcript, one line per exchange (`ap_tr_add()`; out of `autopid_runner.c` 2026-10-05, 700-line rule) |
 | `autopid_runner_j1939.c` | the passive runner (2026-10-03, see "J1939 rows"): a `PGN:` row read from the J1939 listener's store, published when the store holds a message the row has not published yet, stamped with the message's own time; the test-a-PID path for a PGN command |
 | `autopid_j1939_core.c` / `autopid_j1939.h` | PURE J1939 rows: the `PGN:<hex>[@<source>][?]` grammar, the scheduling class of a row (`chip` / `passive` / `bus_tx`), the little-endian expression of one SPN of the j1939 component's built-in table (`(B3+B4*256)*0.125`) |
@@ -94,7 +95,7 @@ Decisions log there is authoritative; the big ones:
 | `autopid_identify.c` | who is this car, shared by first contact and the detection job: the responder set (one headers-on bitmap request) and the VIN, per dialect |
 | `autopid_dialect.c` / `autopid_dialect.h` | PURE OBD dialects (`obd2`, `uds`, `j1939`): the requests of a dialect, the data shift of its expressions, the bitmap + responder parser for every print shape of the chip (11-bit, 29-bit as four byte tokens, headers off), the per-ECU support table and the owner of a PID, the physical address of a responder, the CAN protocols a contact probe may use on a given bus |
 | `autopid_filter.c` | the ATMA filter window: MONITOR claim, header/CRA choreography, frame capture (`ap_filter_frame`, pure), retried stop |
-| `autopid_std.c` | standard PIDs: vendored SAE table (obd2_standard_pids.h, included ONLY here), PURE bit_start to expression mapping + bitmap parser, freeze-frame decode, the table JSON view |
+| `autopid_std.c` | standard PIDs: vendored SAE table (obd2_standard_pids.h, included ONLY here), PURE bit_start to expression mapping (with the row's range: a percent row's full scale as the exact ratio `B2*100/255`, a range below zero as a signed span `[S2:S3]*0.25`, issue #1004) + bitmap parser, freeze-frame decode, the table JSON view |
 | `autopid_names.c` | PURE (2026-10-06): parameter names made unique, `ap_names_dedupe()` over a `pids` array (config rows or the scan's `supported` entries, the later repeat gets `_2`, `_3`, ...) and `ap_config_repair_names()` for a stored file; see "No parameter name twice" below |
 | `autopid_std_scan.c` | the vehicle DETECTION job (the async support scan, split out 2026-10-01): phases `protocol` (which protocol and which dialect answer: a walk over the pinned CAN protocols the bus guard allows, `0100` then `22F400` on each), `vin` (`autopid_identify.c`), `pids` (`autopid_scan_walk.c`); hands the result to the vehicle store (`autopid_vehicle_detected`), then writes `/data/autopid/std_scan.json`; started by the poller itself on an unknown car; owns `ap_std_prelude()` |
 | `autopid_scan_walk.c` | the job's `pids` phase: the support bitmap walk of the car's dialect (per ECU with headers on for `uds`) and one config row per supported PID that decodes something |
@@ -537,6 +538,31 @@ including the Sprinter VS30 of the field report (`--sprinter`).
 }
 ```
 
+**The bounds (`min` / `max`, 2026-10-20, issue #1004).** A parameter's
+range serves the dashboard (the gauge's scale) and the poller. A VW T6.1
+with a full tank answered `41 2F FF`; the standard FuelTankLevel row
+decoded it as `B2*0.3921568692` = 100.000001646, a hair above its max of
+100 (the table's scale is a float printed with ten digits), and v6
+dropped it: the dashboard went stale, MQTT kept the old value, the Test
+button showed 100.000001646. The legacy firmware clamped a standard PID
+to the table's range and only dropped a custom PID outside bounds the
+user set. The rule now (`autopid_bounds.c`, pure): float noise never
+drops a reading, a value beyond a bound by at most 1e-6 of the bound is
+clamped to it whatever the row; beyond that a STANDARD OBD row clamps
+(the table's range is its display range) and a custom, specific or
+J1939 row drops the reading (its bounds are a filter: a profile's SOC
+max 100 against a raw 0xFF, J1939's `FF..` not available). The table's
+ranges were approximate for a quarter of its rows (a fuel trim reaches
+99.22 against a max of 99, a narrowband sensor 1.275 V against 1, the
+first wide-range sensor 8 V against 2); 33 of them now say what a full
+scale decodes to, and the generator writes a percent row's scale as the
+exact ratio (`B2*100/255`: 0xFF decodes to 100, not 100.000001646) and a
+range below zero as a signed span (`[S2:S3]*0.25`, the evaporative
+system vapour pressure). Rows stored by an earlier alfa keep their
+expression and range: they clamp instead of dropping. Bench:
+`tools/testbench/obd/autopid_bounds_bench.py` (`AUTOPID BOUNDS PASS`, the
+ECU simulator's tank at 100 %).
+
 `period_ms 0` on a PID inherits the group; group `period_ms 0` =
 high-fidelity max-rate (entries round-robin as fast as the chip
 answers: **~19 req/s total / 53 ms per request measured**, shared
@@ -904,7 +930,7 @@ and polls a 24-parameter PID on the simulator: the regression for the
 
 ## Tests
 
-`host_test/` (run: `.\test.ps1 host autopid`, 133 tests): what a chain of the tables sets on the chip and the chain that puts the baseline back (`test_chain.c`, 4 cases, 2026-10-20: the BMW row of issue #964, the published i3 / Mini / e-Ulysse chains, the off and reset forms set nothing, every undo command fits `AP_RESTORE_LEN`); the detection's rows as a new car's tables, on or off (`test_scan_rows.c`, 3 cases, 2026-10-09); the J1939 rows
+`host_test/` (run: `.\test.ps1 host autopid`, 137 tests): the bounds on a decoded value and the SAE rows inside their own range (`test_bounds.c`, 4 cases, 2026-10-20: the report's 100.000001646 clamped to 100 on a standard and on a custom row, the reporter's controlled values, the tolerance, a J1939 not-available raw dropped, the exact ratio and the signed span, every ranged table row decoded at 0x00 / 0xFF / 0x7F / 0x80 through the real parser inside its range); what a chain of the tables sets on the chip and the chain that puts the baseline back (`test_chain.c`, 4 cases, 2026-10-20: the BMW row of issue #964, the published i3 / Mini / e-Ulysse chains, the off and reset forms set nothing, every undo command fits `AP_RESTORE_LEN`); the detection's rows as a new car's tables, on or off (`test_scan_rows.c`, 3 cases, 2026-10-09); the J1939 rows
 (`test_j1939_rows.c`, 10 cases: the `PGN:` grammar and its refusals, the
 config parser's typed fields and the `init` / `rxheader` refusal, the
 scheduler's class-masked pick and the 20 ms passive floor, the built-in
