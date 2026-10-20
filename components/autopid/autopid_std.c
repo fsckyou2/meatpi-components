@@ -84,9 +84,14 @@ static void fmt_literal(double v, char *out, size_t len)
 static bool scale_literal(double scale, double offset, int bits, double max,
                           char *out, size_t len)
 {
-    double raw_max = ldexp(1.0, bits) - 1.0;
+    /* no libm on the IDF linux target: ldexp() and nearbyint() failed the
+       CI link (x86-64, 2026-10-21; aarch64 had inlined them), so 2^bits - 1
+       as an integer, and the nearest integer of a positive n by a cast */
+    double raw_max = (bits >= 64) ? 18446744073709551615.0
+                                  : (double)(((uint64_t)1 << bits) - 1);
     double full = raw_max * scale + offset;
     double n = max - offset;
+    double n_near = (n > 0 && n < 1e15) ? (double)(uint64_t)(n + 0.5) : NAN;
     double tol = fabs(max) * AP_BOUNDS_TOL_REL;
 
     if (tol < AP_BOUNDS_TOL_ABS)
@@ -95,9 +100,9 @@ static bool scale_literal(double scale, double offset, int bits, double max,
     }
 
     if (!isnan(max) && scale != 1.0 && fabs(full - max) <= tol && n > 0 &&
-        fabs(n - nearbyint(n)) < 1e-9)
+        fabs(n - n_near) < 1e-9)
     {
-        snprintf(out, len, "%.0f/%.0f", nearbyint(n), raw_max);
+        snprintf(out, len, "%.0f/%.0f", n_near, raw_max);
         return true;
     }
 

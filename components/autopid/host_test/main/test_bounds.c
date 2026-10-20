@@ -188,10 +188,19 @@ void test_bounds_whole_table_inside_its_range(void)
                 continue;
             }
 
-            double lo_tol = fmax(AP_BOUNDS_TOL_ABS,
-                                 fabs(prm->min) * AP_BOUNDS_TOL_REL);
-            double hi_tol = fmax(AP_BOUNDS_TOL_ABS,
-                                 fabs(prm->max) * AP_BOUNDS_TOL_REL);
+            /* no fmax(): the IDF linux target links no libm (2026-10-21) */
+            double lo_tol = fabs(prm->min) * AP_BOUNDS_TOL_REL;
+            double hi_tol = fabs(prm->max) * AP_BOUNDS_TOL_REL;
+
+            if (lo_tol < AP_BOUNDS_TOL_ABS)
+            {
+                lo_tol = AP_BOUNDS_TOL_ABS;
+            }
+
+            if (hi_tol < AP_BOUNDS_TOL_ABS)
+            {
+                hi_tol = AP_BOUNDS_TOL_ABS;
+            }
 
             for (size_t p = 0; p < sizeof(PATTERN); p++)
             {
