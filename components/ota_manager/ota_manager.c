@@ -120,13 +120,16 @@ static esp_err_t io_begin(void *io, size_t total_size)
 
     (void)ota_manager_confirm_running();
 
-    ESP_LOGI(TAG, "update session -> %s (%s size)", s_target->label,
-             (total_size > 0) ? "announced" : "unknown");
-    /* OTA_SIZE_UNKNOWN erases the whole partition up-front; with an
-       announced size esp_ota erases incrementally */
-    return esp_ota_begin(s_target,
-                         (total_size > 0) ? total_size : OTA_SIZE_UNKNOWN,
-                         &s_handle);
+    ESP_LOGI(TAG, "update session -> %s (%s size, erased as written)",
+             s_target->label, (total_size > 0) ? "announced" : "unknown");
+    /* OTA_WITH_SEQUENTIAL_WRITES: esp_ota erases each sector right before
+       its first write. Any other size erases the whole image size up front
+       in ONE call (IDF esp_ota_begin), 4 to 5 s with the cache off for a
+       3.8 MB image: IDLE0 starved and the task watchdog fired in the
+       middle of an upload (the release test, 2026-10-21). The session
+       writes in sequence (the held-back head goes first) and still
+       enforces the announced size on overrun. */
+    return esp_ota_begin(s_target, OTA_WITH_SEQUENTIAL_WRITES, &s_handle);
 }
 
 static esp_err_t io_write(void *io, const void *data, size_t len)

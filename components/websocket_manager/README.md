@@ -34,6 +34,11 @@ about what flows through it.
   `HTTPD_WS_CLIENT_WEBSOCKET` and is reaped on the next `send()`
   (`tx_drops`) AND at every handshake (so a quiet channel can't fill with
   ghosts and refuse legitimate clients); the channel keeps running.
+  Since 2026-10-21 a client whose handshake is still in flight is not a
+  ghost: the pre-handshake hook registers the fd before the 101 goes out,
+  and a fan-out send in that moment used to reap the newcomer (it then got
+  no frames and a third client took its slot: found by the release test).
+  An fd that stays `HTTPD_WS_CLIENT_HTTP` past a 3 s grace is a ghost.
 - **TCP_NODELAY** is set on every client at handshake: httpd transmits a
   WS frame as two `send()`s (header, payload), with Nagle the payload
   stalls ~40 ms on the peer's delayed ACK (measured; see BENCHMARKS.md).

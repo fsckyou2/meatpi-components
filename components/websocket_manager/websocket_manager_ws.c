@@ -38,6 +38,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -52,9 +53,19 @@ static const char *TAG = "websocket_manager";
 
 #define WSM_FRAME_MAX 4096 /* per-frame RX cap (request-scoped PSRAM) */
 
+/* A client is registered by the pre-handshake hook, BEFORE its 101 goes
+ * out, so for a moment it reads HTTPD_WS_CLIENT_HTTP: a fan-out send in
+ * that moment used to reap it (2026-10-21, the release test: "client
+ * reaped" and "client connected" in the same millisecond, the client then
+ * got nothing and a third one took its slot). Within this grace an HTTP
+ * state means "handshake in flight"; past it, a ghost (a silently closed
+ * fd that an HTTP session reused). */
+#define WSM_HANDSHAKE_GRACE_US (3LL * 1000 * 1000)
+
 typedef struct
 {
     int fds[WEBSOCKET_MANAGER_MAX_CLIENTS]; /* -1 = free                */
+    int64_t since[WEBSOCKET_MANAGER_MAX_CLIENTS]; /* registered at (us) */
     QueueHandle_t sub;
     websocket_stats_t stats;
 } wsm_channel_t;
@@ -102,12 +113,29 @@ static bool client_add(wsm_channel_t *ch, int fd)
         if (ch->fds[i] < 0)
         {
             ch->fds[i] = fd;
+            ch->since[i] = esp_timer_get_time();
             ch->stats.clients++;
             return true;
         }
     }
 
     return false;
+}
+
+/** A registered fd that is no longer a client: closed (httpd knows no
+ *  session, or a reused fd that stayed HTTP past the handshake grace).
+ *  A handshake still in flight is NOT a ghost. */
+static bool client_is_ghost(httpd_handle_t server, int fd, int64_t since)
+{
+    httpd_ws_client_info_t info = httpd_ws_get_fd_info(server, fd);
+
+    if (info == HTTPD_WS_CLIENT_WEBSOCKET)
+    {
+        return false;
+    }
+
+    return info != HTTPD_WS_CLIENT_HTTP ||
+           esp_timer_get_time() - since > WSM_HANDSHAKE_GRACE_US;
 }
 
 /* ---- handshake gate (IDF v6: the uri handler is NOT called at handshake,
@@ -136,8 +164,7 @@ static esp_err_t ws_pre_handshake(httpd_req_t *req)
     for (int i = 0; server != NULL && i < WEBSOCKET_MANAGER_MAX_CLIENTS; i++)
     {
         if (ch->fds[i] >= 0 &&
-            httpd_ws_get_fd_info(server, ch->fds[i]) !=
-                HTTPD_WS_CLIENT_WEBSOCKET)
+            client_is_ghost(server, ch->fds[i], ch->since[i]))
         {
             ESP_LOGD(TAG, "%s: stale client reaped (fd %d)", cfg->name,
                      ch->fds[i]);
@@ -371,9 +398,11 @@ esp_err_t wsm_ws_send(int idx, const uint8_t *data, size_t len)
      * sends under s_lock starve the RX handler at high TX rates
      * (measured: bidirectional WS throughput collapsed) */
     int fds[WEBSOCKET_MANAGER_MAX_CLIENTS];
+    int64_t since[WEBSOCKET_MANAGER_MAX_CLIENTS];
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     memcpy(fds, ch->fds, sizeof(fds));
+    memcpy(since, ch->since, sizeof(since));
     xSemaphoreGive(s_lock);
 
     bool failed[WEBSOCKET_MANAGER_MAX_CLIENTS] = { false };
@@ -388,8 +417,16 @@ esp_err_t wsm_ws_send(int idx, const uint8_t *data, size_t len)
             continue;
         }
 
+        httpd_ws_client_info_t info = httpd_ws_get_fd_info(server, fd);
+
+        if (info != HTTPD_WS_CLIENT_WEBSOCKET &&
+            !client_is_ghost(server, fd, since[c]))
+        {
+            continue; /* its handshake is in flight: this frame is not its */
+        }
+
         /* reap silently-closed clients before wasting a send */
-        if (httpd_ws_get_fd_info(server, fd) != HTTPD_WS_CLIENT_WEBSOCKET ||
+        if (info != HTTPD_WS_CLIENT_WEBSOCKET ||
             httpd_ws_send_frame_async(server, fd, &frame) != ESP_OK)
         {
             failed[c] = true;
