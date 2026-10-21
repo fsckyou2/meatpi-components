@@ -276,6 +276,9 @@ esp_err_t fw_update_install(fw_update_target_t target, const char *version,
  *  (the restart is scheduled). */
 esp_err_t fw_update_abort(void);
 
+/** The snapshot (about 1 KB: keep it off task stacks). RAM only, so safe
+ *  from a PSRAM-stack task (the HA poster): the slot fields are the record
+ *  the boot task and the confirm helper read from flash (2026-10-21). */
 esp_err_t fw_update_status(fw_update_status_t *out);
 
 /**

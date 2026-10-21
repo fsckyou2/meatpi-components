@@ -58,6 +58,10 @@ The snapshot. Never mutates, never fetches.
   bootloader), `pending_verify` (the new bootloader's word), `valid`,
   `invalid`, `aborted`, `undefined` (a factory-flashed slot).
   `bootloader_version` 2 = built with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`.
+  The `rollback` object is the record the firmware read from flash at boot
+  and after its last confirm (the milestone, `fw_update_confirm()`), not a
+  live read: the snapshot itself touches no flash (2026-10-21, README
+  "Flash reads and PSRAM stacks").
 - `cellular.policy` is the constant `wifi_only` (2026-10-19, Ali): the lists
   and the notes are read on any uplink, an image is never downloaded while
   `is_cellular` is true (the dongle's LTE carries the default route). The

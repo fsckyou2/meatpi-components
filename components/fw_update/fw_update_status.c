@@ -25,19 +25,20 @@
  * @brief The snapshot GET /api/fw_update, the console and the HA push read:
  *        the settings as applied, the uplink, the last check, this device
  *        against the manifest, the job, the last recorded job and the
- *        rollback state of the slots.
+ *        rollback state of the slots. RAM only: the HA poster calls this
+ *        from a PSRAM stack, and a flash read there aborts the firmware
+ *        (the field crash of 2026-10-21), so the slots come from the record
+ *        the boot task and the confirm helper read (fwu_slots_read_fn).
  */
 #include "fw_update_private.h"
 
 #include <string.h>
 #include <time.h>
 
-#include "esp_bootloader_desc.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 
 #include "dev_status_manager.h"
-#include "ota_manager.h"
 #include "partition_migrate.h"
 
 static void fill_self(fw_update_status_t *o, const fwu_manifest_t *m,
@@ -92,35 +93,18 @@ static void fill_self(fw_update_status_t *o, const fwu_manifest_t *m,
     }
 }
 
+/** The slots as the boot task (init) or the confirm helper last read them
+ *  on an internal stack: a copy, no flash (under the engine lock). */
 static void fill_rollback(fw_update_status_t *o)
 {
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
-    esp_ota_img_states_t st;
-    esp_bootloader_desc_t bl;
+    const fwu_slots_t *s = &FWU->slots;
 
-    strlcpy(o->running, (running != NULL) ? running->label : "", sizeof(o->running));
-    strlcpy(o->previous, (next != NULL) ? next->label : "", sizeof(o->previous));
-
-    if (running != NULL && esp_ota_get_state_partition(running, &st) == ESP_OK)
-    {
-        strlcpy(o->ota_state, ota_manager_img_state_str((int)st),
-                sizeof(o->ota_state));
-        o->pending_verify = st == ESP_OTA_IMG_PENDING_VERIFY ||
-                            st == ESP_OTA_IMG_NEW;
-    }
-    else
-    {
-        strlcpy(o->ota_state, "unknown", sizeof(o->ota_state));
-    }
-
-    if (esp_ota_get_bootloader_description(NULL, &bl) == ESP_OK)
-    {
-        o->bootloader_version = bl.version;
-        /* CONFIG_BOOTLOADER_PROJECT_VER 2 = built with the rollback option
-           (2026-10-18); the field bootloaders say 1 */
-        o->bootloader_rollback = bl.version >= 2;
-    }
+    strlcpy(o->running, s->running, sizeof(o->running));
+    strlcpy(o->previous, s->previous, sizeof(o->previous));
+    strlcpy(o->ota_state, s->valid ? s->ota_state : "unknown", sizeof(o->ota_state));
+    o->pending_verify = s->pending_verify;
+    o->bootloader_version = s->bootloader_version;
+    o->bootloader_rollback = s->bootloader_rollback;
 }
 
 esp_err_t fwu_status_build(fw_update_status_t *out)
@@ -203,7 +187,7 @@ esp_err_t fwu_status_build(fw_update_status_t *out)
     }
 
     fwu_dongle_status_fill(out);
-    fwu_engine_unlock();
     fill_rollback(out);
+    fwu_engine_unlock();
     return ESP_OK;
 }

@@ -99,6 +99,32 @@ esp_err_t fwu_store_erase(void);
  *  @p wait_ms; ESP_ERR_NO_MEM / ESP_ERR_TIMEOUT otherwise. */
 esp_err_t fwu_run_internal(void (*fn)(void *), void *arg, uint32_t wait_ms);
 
+/* ---- the slots (fw_update_boot.c) --------------------------------------------------- */
+
+/** What the flash says about the two app slots: the labels, the running
+ *  image's otadata state and the bootloader's description. The otadata
+ *  read maps flash and the description is a flash read: both freeze the
+ *  cache, and IDF aborts a task whose stack is in PSRAM there (the field
+ *  crash of 2026-10-21: the HA poster built its push from the status and
+ *  parked the device). So the flash is read on an INTERNAL stack only, at
+ *  init on the boot task and after every confirm on the helper, and the
+ *  status copies this record from under the engine lock. */
+typedef struct
+{
+    bool     valid;                 /**< read at least once                 */
+    bool     pending_verify;        /**< NEW or PENDING_VERIFY              */
+    char     running[8];
+    char     previous[8];
+    char     ota_state[16];         /**< ota_manager_img_state_str()        */
+    bool     bootloader_rollback;   /**< description version >= 2           */
+    uint32_t bootloader_version;
+} fwu_slots_t;
+
+/** Read the slots from flash into @p arg (an fwu_slots_t *, NULL = no-op).
+ *  Caller on an INTERNAL stack: the boot task at init, or a
+ *  fwu_run_internal() payload. */
+void fwu_slots_read_fn(void *arg);
+
 /* ---- the fetch path (fw_update_fetch.c) -------------------------------------------- */
 
 typedef struct
@@ -209,6 +235,7 @@ typedef struct
     fwu_release_t   job_rel;
     fwu_record_t    rec;
     bool            rec_valid;
+    fwu_slots_t     slots;      /**< the flash's word on the slots (above)  */
     uint32_t        job_seq;
     bool            inited;
     bool            started;
@@ -248,7 +275,7 @@ void fwu_notify(void);                                     /* NOT under the lock
 void fwu_verify_now(const char *why);
 void fwu_renew_hold(void);
 void fwu_write_record_fn(void *arg);   /* fwu_run_internal() payloads */
-void fwu_confirm_fn(void *arg);
+void fwu_confirm_fn(void *arg);        /* the confirm, then the slots read */
 void fwu_erase_record_fn(void *arg);
 void fwu_restart_task(void *arg);      /* the planned OTA_APPLY restart */
 /** The check interval with its +-10 % jitter, in microseconds. */

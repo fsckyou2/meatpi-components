@@ -23,6 +23,7 @@
 /**
  * @file fw_update_boot.c
  * @brief The flash side: the job record in NVS, the internal-stack helper,
+ *        the slots read (otadata and the bootloader description, 2026-10-21)
  *        and the boot-path check that turns the crash-loop brake's park
  *        verdict into a rollback to the previous slot. Runs on the boot
  *        task (internal stack) before settings and before main_park_check():
@@ -34,6 +35,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "esp_bootloader_desc.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "freertos/FreeRTOS.h"
@@ -41,6 +43,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 
+#include "ota_manager.h"
 #include "restart_tracker.h"
 
 static const char *TAG = FWU_TAG;
@@ -148,6 +151,10 @@ static void run_task(void *p)
     run_ctx_t *ctx = p;
 
     ctx->fn(ctx->arg);
+    /* standard section 2: an ephemeral task shows its headroom before it
+       goes (DEBUG: the helper runs per operation, a few times per boot) */
+    ESP_LOGD(TAG, "fwu_flash stack_hw=%u B",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
     xSemaphoreGive(ctx->done);
     vTaskDelete(NULL);
 }
@@ -191,6 +198,48 @@ esp_err_t fwu_run_internal(void (*fn)(void *), void *arg, uint32_t wait_ms)
 
     xSemaphoreGive(gate);
     return err;
+}
+
+/* ---- the slots --------------------------------------------------------------------- */
+
+void fwu_slots_read_fn(void *arg)
+{
+    fwu_slots_t *s = arg;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+    esp_ota_img_states_t st;
+    esp_bootloader_desc_t bl;
+
+    if (s == NULL)
+    {
+        return;
+    }
+
+    memset(s, 0, sizeof(*s));
+    strlcpy(s->running, (running != NULL) ? running->label : "", sizeof(s->running));
+    strlcpy(s->previous, (next != NULL) ? next->label : "", sizeof(s->previous));
+
+    /* the otadata read maps flash: this stack must be internal (the header) */
+    if (running != NULL && esp_ota_get_state_partition(running, &st) == ESP_OK)
+    {
+        strlcpy(s->ota_state, ota_manager_img_state_str((int)st), sizeof(s->ota_state));
+        s->pending_verify = st == ESP_OTA_IMG_PENDING_VERIFY || st == ESP_OTA_IMG_NEW;
+    }
+    else
+    {
+        strlcpy(s->ota_state, "unknown", sizeof(s->ota_state));
+    }
+
+    /* the bootloader's description is a flash read: the same rule */
+    if (esp_ota_get_bootloader_description(NULL, &bl) == ESP_OK)
+    {
+        s->bootloader_version = bl.version;
+        /* CONFIG_BOOTLOADER_PROJECT_VER 2 = built with the rollback option
+           (2026-10-18); the field bootloaders say 1 */
+        s->bootloader_rollback = bl.version >= 2;
+    }
+
+    s->valid = true;
 }
 
 /* ---- the boot check ---------------------------------------------------------------- */

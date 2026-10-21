@@ -208,10 +208,16 @@ void fwu_write_record_fn(void *arg)
     (void)fwu_store_write(&FWU->rec);
 }
 
+/* the helper's answer to a confirm: the slots as the flash says them now.
+   One helper runs at a time (fwu_run_internal's gate); the caller copies it
+   into the state under the engine lock, which the helper never takes */
+static fwu_slots_t s_slots_read EXT_RAM_BSS_ATTR;
+
 void fwu_confirm_fn(void *arg)
 {
     (void)arg;
     (void)ota_manager_confirm_running();
+    fwu_slots_read_fn(&s_slots_read);
 }
 
 void fwu_erase_record_fn(void *arg)
@@ -240,7 +246,14 @@ void fwu_verify_now(const char *why)
     }
 
     fwu_engine_unlock();
-    (void)fwu_run_internal(fwu_confirm_fn, NULL, 5000);
+
+    if (fwu_run_internal(fwu_confirm_fn, NULL, 5000) == ESP_OK)
+    {
+        /* the slots after the confirm: what the status shows from now on */
+        fwu_engine_lock();
+        FWU->slots = s_slots_read;
+        fwu_engine_unlock();
+    }
 
     if (pending)
     {
@@ -413,6 +426,10 @@ esp_err_t fw_update_init(void)
     FWU->cmds = xQueueCreateStatic(4, sizeof(fwu_cmd_t), s_cmds_store, &s_cmds_buf);
     FWU->rec_valid = fwu_store_read(&FWU->rec);
     FWU->job_seq = FWU->rec_valid ? FWU->rec.job_id : 0;
+    /* the slots, read in line: init runs on the boot task's internal stack
+       (the NVS read above relies on the same); every later read is the
+       confirm helper's, never the status builder's (2026-10-21) */
+    fwu_slots_read_fn(&FWU->slots);
     FWU->inited = true;
     fwu_dongle_init();
     return fwu_settings_register();

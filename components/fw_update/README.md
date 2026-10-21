@@ -99,7 +99,7 @@ bootloader runs (`rollback.bootloader_version` 2 = with the option).
 | `fw_update_check_now(&id)` | A manifest check on the task; a running check answers its id, an install `ESP_ERR_INVALID_STATE`. |
 | `fw_update_install(target, version, flags, &id, why, &already)` | Validates against the last view synchronously (busy, no manifest, no network, unknown / not visible / yanked version, the layout verdict, `FW_UPDATE_F_CONFIRM_WIPE`, the cellular policy with `FW_UPDATE_F_ALLOW_CELLULAR`, 24 KB free internal RAM), then the task re-fetches the manifest (a yank must beat a cached view), downloads through the pipe (three attempts for a transport failure), writes the record and restarts 1.5 s later through `restart_tracker_restart(OTA_APPLY, OTA, id)`. Idempotent on (target, version). `already` = the running firmware is that version. The dongle target answers `dongle_absent` until the relay is built (D1). |
 | `fw_update_abort()` | `ESP_ERR_NOT_FOUND` without a job, `ESP_ERR_INVALID_STATE` once the restart is scheduled. |
-| `fw_update_status(*out)` | The snapshot (`fw_update_status_t`, ~1 KB: keep it off task stacks): settings, uplink, the last check, this device against the manifest, the job, the last recorded job, the slots. |
+| `fw_update_status(*out)` | The snapshot (`fw_update_status_t`, ~1 KB: keep it off task stacks): settings, uplink, the last check, this device against the manifest, the job, the last recorded job, the slots. RAM only, so a PSRAM-stack task may call it (the HA poster does): the slot fields are the record the boot task and the confirm helper read from flash, see "Flash reads and PSRAM stacks" below (2026-10-21). |
 | `fw_update_notes(target, version, &psram, &len)` | The release notes fetched on the task (<= 16 KB, markdown), freed by the caller. |
 | `fw_update_confirm()` | The milestone by hand (the console, the bench). |
 | `fw_update_forget()` | Erases the record (the bench). Caller on an internal stack. |
@@ -119,8 +119,8 @@ bootloader runs (`rollback.bootloader_version` 2 = with the option).
 | `fw_update_fetch_ram.c` | a release's image into a PSRAM buffer of exactly its size (the relay's download) |
 | `fw_update_version.c`, `fw_update_core.c`, `fw_update_record.c` | PURE, host-tested: the version grammar (strict and tolerant) and order, channel visibility, the bounded manifest parse, the selection with stepping and yanked, the layout verdict, URL composition; the record codec and the boot decision table |
 | `fw_update_fetch.c` | the manifest with its ETag, the notes, the image into the pipe (`http_client_manager_stream`) |
-| `fw_update_boot.c` | the record store, the internal-stack helper (`fwu_run_internal`), the boot check |
-| `fw_update_status.c` | the snapshot |
+| `fw_update_boot.c` | the record store, the internal-stack helper (`fwu_run_internal`), the slots read (`fwu_slots_read_fn`: otadata and the bootloader description, internal stacks only), the boot check |
+| `fw_update_status.c` | the snapshot: RAM only, the slots copied from the record above under the engine lock |
 | `fw_update_settings.c`, `fw_update_http.c`, `fw_update_cli.c` | the standard's set |
 
 ## Dependencies
@@ -161,6 +161,27 @@ failed before it (the failure stays in `job` until the next job). The otadata
 confirm is one more write when the running image was `NEW` or
 `PENDING_VERIFY`. Steady state: `WICAN FLASH writes=0 erases=0`.
 
+## Flash reads and PSRAM stacks (2026-10-21)
+
+The standard's section 2 corollary covers flash writes; a flash READ that
+goes through the SPI1 driver (`esp_partition_read`, the otadata map behind
+`esp_ota_get_state_partition`, `esp_ota_get_bootloader_description`, NVS)
+freezes the cache the same way, and IDF aborts the firmware when the
+calling task's stack is in PSRAM (`esp_cache_freeze_caches_disable_interrupts`,
+`s_task_stack_is_sane_when_cache_frozen`). 6.0.0-beta.1 shipped the status
+builder reading otadata, and the HA webhook poster (a PSRAM stack) builds
+its push from the status: every device with Home Assistant webhooks on
+crashed at its first push, three times, and parked (the field report of
+2026-10-21, reproduced on the bench with `ha_webhook_gate_bench.py`). Rule
+in this component since: **`fw_update_status()` reads no flash.** The slots
+are read by `fwu_slots_read_fn` on an internal stack only, at init on the
+boot task and after every confirm on the helper (`fwu_confirm_fn`, the
+milestone and `fw_update_confirm()`), into `fwu_state_t.slots`; the builder
+copies that record under the engine lock. The record can lag by one event
+at most: an `ota_manager` session that confirmed the running image before
+the milestone (an upload in the first ten minutes after an update) shows
+`pending_verify` until the milestone's own confirm refreshes it.
+
 ## Memory footprint (estimated until the bench measures them)
 
 | Item | Where | Size |
@@ -191,3 +212,10 @@ Pre-flight before a download: `dev_status_manager_memory()` internal free
   TESTING.md, 2026-10-19): the dongle through the relay, legs o0 to o8.
 - `tools/webui_preview/probe_fw_update.mjs`: the Updates card over the mock,
   both rows (53 checks).
+- `tools/testbench/ha/ha_webhook_gate_bench.py` and
+  `ha_webhook_sta_ip_bench.py` (TESTING.md): the HA push built on a PSRAM
+  stack from `fw_update_status()`, the canary for a flash read in the
+  snapshot (2026-10-21: FAIL with the DUT parked before the fix, PASS
+  after). They run on every release build, with `.\test.ps1 fwupdate`
+  (legs f3 and f10 read the slot fields after a restart and after the
+  milestone, which is the record's refresh).
