@@ -1633,6 +1633,7 @@ const NAV=[
   {r:"power",t:"Power Saving",i:"battery"},
   {r:"logger",t:"Logger",i:"harddrive"},
   {r:"dashboard",t:"Dashboard",i:"gauge"},
+  {r:"precondition",t:"Preconditioning",i:"thermo"},
   {r:"monitor",t:"CAN Monitor",i:"monitor",sub:[{id:"monitor",t:"Monitor"},{id:"trace",t:"Trace"},{id:"settings",t:"Settings"}]},
   {r:"terminal",t:"Terminal",i:"terminal"},
   {r:"advanced",t:"Advanced",i:"sliders"},
@@ -3099,6 +3100,59 @@ PAGES.power=async(view)=>{
       note("warn","Disabling sleep continuously drains the vehicle battery when the engine is off. Only disable for testing.")));
   }catch(e){wrap.append(banner("crit","alert",e.message));}
   return null;
+};
+
+/* ---- Preconditioning ---- */
+/* E-GMP manual battery preconditioning (wicant-i-precondition firmware):
+   live state from /api/precondition, the start/stop the button in the car
+   does, text for the dash popup, and the precondition settings. */
+const PRECON_CARS={ioniq5:"Ioniq 5",ioniq6:"Ioniq 6",ev6:"EV6"};
+function preconAge(ms){const s=Math.max(0,Math.round(ms/1000));
+  return s<60?s+"s":s<3600?Math.floor(s/60)+"m":Math.floor(s/3600)+"h";}
+function preconTemp(c,unit){return unit==="f"?Math.round(c*9/5+32)+"\u00b0F":c+"\u00b0C";}
+PAGES.precondition=async(view)=>{
+  const p=page(view,null,"Preconditioning","Warm the battery for a charging stop, from the button in the car or from here.");
+  const waiting="Waiting for CAN data";
+  const stateEl=h("div",{class:"rowflex",style:"gap:8px;margin-bottom:10px;flex-wrap:wrap"});
+  const kvEl=h("div",{});
+  const toggleBtn=h("button",{class:"btn pri",onclick:async()=>{toggleBtn.disabled=true;
+    try{await api("/api/precondition/toggle",{method:"POST"});}catch(e){toast(e.message,"err");}
+    finally{toggleBtn.disabled=false;setTimeout(refresh,200);}}},"Start preconditioning");
+  const popupIn=h("input",{type:"text",maxlength:"50",autocomplete:"off",placeholder:"Text to show in the car",style:"flex:1;min-width:0",
+    onkeydown:e=>{if(e.key==="Enter")showPopup();}});
+  const popupBtn=h("button",{class:"btn",onclick:()=>showPopup()},"Show");
+  async function showPopup(){
+    if(!popupIn.value){toast("Enter some text first","err");return;}
+    popupBtn.disabled=true;
+    try{await api("/api/precondition/popup",{method:"POST",headers:{"Content-Type":"text/plain; charset=UTF-8"},
+        body:new TextEncoder().encode(popupIn.value).buffer});toast("Sent to the car","ok");}
+    catch(e){toast(e.message,"err");}
+    finally{popupBtn.disabled=false;}
+  }
+  async function refresh(){
+    const o=await tryGet("/api/precondition");
+    if(!o){stateEl.replaceChildren(chip("Unavailable","crit"));return;}
+    stateEl.replaceChildren(
+      o.starting?chip("Starting","warn"):o.active?chip("Active","ok"):o.requested?chip("Requested","warn"):chip("Off",""),
+      chip(o.car_ready?"Car ready":"Car not ready",o.car_ready?"ok":""));
+    kvEl.replaceChildren(kv([
+      ["Car",o.car_model?PRECON_CARS[o.car_model]:waiting],
+      ["Requested",o.requested?"Yes":"No"],
+      ["Active",o.starting?"Starting":o.active?"Yes":"No"],
+      ["HV battery state of charge",o.battery_soc?o.battery_soc.pct+"% ("+preconAge(o.battery_soc.age_ms)+" ago)":waiting],
+      ["HV battery temperature",o.battery_temp?"Min "+preconTemp(o.battery_temp.min_c,o.temp_unit)+", max "+
+        preconTemp(o.battery_temp.max_c,o.temp_unit)+" ("+preconAge(o.battery_temp.age_ms)+" ago)":waiting]]));
+    toggleBtn.replaceChildren(o.requested?"Stop preconditioning":"Start preconditioning");
+    toggleBtn.className=o.requested?"btn danger":"btn pri";
+  }
+  p.append(card("Status","thermo",stateEl,kvEl,h("div",{style:"margin-top:12px"},toggleBtn)));
+  p.append(card("Dash popup","send",h("div",{class:"rowflex",style:"gap:8px"},popupIn,popupBtn)));
+  const wrap=h("div",{});p.append(wrap);
+  try{wrap.append(card("Settings","settings",...await settingsForm("precondition",null)));}
+  catch(e){wrap.append(banner("crit","alert",e.message));}
+  await refresh();
+  const t=setInterval(()=>{if(conn.state==="online")refresh();},2000);
+  return()=>clearInterval(t);
 };
 
 /* ---- Logger ---- */
