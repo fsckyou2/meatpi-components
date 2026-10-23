@@ -1267,6 +1267,9 @@ const LABELS={
   uart:"UART console","usb_acm_cli.gps":"USB GPS receiver","usb_acm_cli.console":"ESPNetLink console over USB",
   /* config_backup (issue #979, 2026-10-11) */
   "config_backup.auto_copy":"Keep the copies up to date",
+  /* precondition: E-GMP manual battery preconditioning (wicant-i-precondition) */
+  "precondition.mode":"Mode","precondition.button":"Activation button","precondition.press":"Press type",
+  "precondition.temp_unit":"Battery temperature unit",
 };
 const HELP={
   cli:"Register this component's commands on the serial console.",
@@ -1358,8 +1361,20 @@ const HELP={
   bonding:"Keep pairing keys so a phone reconnects without re-entering the passkey.",
   ip_mode:"Automatic (DHCP) works for almost every network.",
   sta_ip_mode:"Automatic (DHCP) works for almost every network.",
+  "precondition.mode":"Once: precondition until the battery is warm, then stop. Continuous: leave it to the car for the rest of the drive. Persistent: as Continuous, and ask again each time the car is ready.",
+  "precondition.button":"The button in the car that starts and stops preconditioning.",
+  "precondition.press":"Long: hold the button for a second.",
 };
 const ENUMS={
+  "precondition.mode":{once:"Once",continuous:"Continuous",persistent:"Persistent"},
+  "precondition.button":{disabled:"Disabled",sw_star:"Star Button (Steering Wheel)",avn_star:"Star Button (Climate Bar)",
+    avn_tuner_in:"Tuner Press (Climate Bar)",avn_vol_in:"Volume Press (Climate Bar)",ev6_avn_setup:"Setup (EV6 Climate Bar)",
+    sw_mode:"Mode (Steering Wheel)",sw_speak:"Speak (Steering Wheel)",sw_call:"Call (Steering Wheel)",sw_vol_in:"Volume Press (Steering Wheel)",
+    sw_vol_up:"Volume Up (Steering Wheel)",sw_vol_down:"Volume Down (Steering Wheel)",sw_skip_up:"Skip Up (Steering Wheel)",
+    sw_skip_down:"Skip Down (Steering Wheel)",sw_ok:"OK (Steering Wheel)",avn_map:"Map (Climate Bar)",avn_nav:"Nav (Climate Bar)",
+    avn_media:"Media (Climate Bar)",avn_tuner_up:"Tuner Up (Climate Bar)",avn_tuner_down:"Tuner Down (Climate Bar)"},
+  "precondition.press":{short:"Short Press",long:"Long Press (hold 1s)"},
+  "precondition.temp_unit":{c:"\u00b0C",f:"\u00b0F"},
   "fw_update.channel":{stable:"Stable",beta:"Beta (release candidates)",alfa:"Alfa (every test build)"},
   "wifi_manager.mode":{off:"Off",sta:"Station only (join a network)",ap:"Access point only",apsta:"Access point + Station"},
   "j1939.mode":{listen:"Listen only (never transmits)",active:"Active (claims an address, can ask and clear)"},
@@ -5446,7 +5461,7 @@ PAGES.allsettings=async(view)=>{
   return null;
 };
 /* ============================================================ BOOT */
-const NICE={fw_update:"Firmware updates",wifi_manager:"Wi-Fi",ble_manager:"Bluetooth",mqtt_manager:"MQTT",autopid:"AutoPID",vpn_manager:"VPN",data_logger:"Logger",sleep_manager:"Power saving",event_manager:"Automation rules",can_manager:"CAN bus",j2534_server:"J2534",usb_host_manager:"USB",led_manager:"LED",socket_manager:"Socket servers",bridge_manager:"Bridges",websocket_manager:"WebSocket channels",script_engine:"Scripts",obd_chip:"OBD chip",battery_monitor:"Battery",imu_manager:"Motion (IMU)",rtc_manager:"Clock",mdns_manager:"mDNS",cert_manager:"Certificates",usb_acm_cli:"USB serial (GPS receiver, ESPNetLink console)",espnetlink:"ESPNetLink",uds_manager:"UDS",interface_manager:"Radio arbitration",dev_status_manager:"Status flags",external_storage:"SD card",filesystem:"Filesystem",restart_tracker:"Restart tracking",log_manager:"Logging",cmdline_manager:"Console",ha_webhooks:"Home Assistant",data_destinations:"Data destinations",mqtt_can:"CAN over MQTT",http_server_manager:"Web server",obd_gate:"OBD gate",iperf_manager:"iPerf (throughput test)",log_sinks:"Log sinks",button_manager:"Button"};
+const NICE={fw_update:"Firmware updates",precondition:"Preconditioning",wifi_manager:"Wi-Fi",ble_manager:"Bluetooth",mqtt_manager:"MQTT",autopid:"AutoPID",vpn_manager:"VPN",data_logger:"Logger",sleep_manager:"Power saving",event_manager:"Automation rules",can_manager:"CAN bus",j2534_server:"J2534",usb_host_manager:"USB",led_manager:"LED",socket_manager:"Socket servers",bridge_manager:"Bridges",websocket_manager:"WebSocket channels",script_engine:"Scripts",obd_chip:"OBD chip",battery_monitor:"Battery",imu_manager:"Motion (IMU)",rtc_manager:"Clock",mdns_manager:"mDNS",cert_manager:"Certificates",usb_acm_cli:"USB serial (GPS receiver, ESPNetLink console)",espnetlink:"ESPNetLink",uds_manager:"UDS",interface_manager:"Radio arbitration",dev_status_manager:"Status flags",external_storage:"SD card",filesystem:"Filesystem",restart_tracker:"Restart tracking",log_manager:"Logging",cmdline_manager:"Console",ha_webhooks:"Home Assistant",data_destinations:"Data destinations",mqtt_can:"CAN over MQTT",http_server_manager:"Web server",obd_gate:"OBD gate",iperf_manager:"iPerf (throughput test)",log_sinks:"Log sinks",button_manager:"Button"};
 const HIDE=new Set(["main_bench"]);
 function niceName(n){return NICE[n]||n.replace(/_manager$/,"").replaceAll("_"," ").replace(/\b\w/g,c=>c.toUpperCase());}
 async function boot(){
