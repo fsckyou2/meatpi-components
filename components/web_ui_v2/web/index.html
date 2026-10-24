@@ -1232,6 +1232,7 @@ const LABELS={
   sta_ble_handover:"Pause the station while a phone is connected over Bluetooth",ap_ble_exclusive:"Pause the access point while a phone is connected over Bluetooth",
   /* sleep_manager */
   sleep_mv:"Sleep voltage (V)",wake_mv:"Wake-up voltage (V)",wake_delay_ms:"Wake up after (s)",sleep_delay_min:"Sleep after (min)",periodic_wakeup:"Periodic wake-up",wakeup_interval_min:"Wake up every (min)",
+  vehicle_on_awake:"Stay awake while the car is on",
   /* data_logger */
   "data_logger.format":"File format",max_file_mb:"Max file size (MB)",max_files:"Files kept",batch_rows:"Rows per batch",
   flush_ms:"Flush interval (ms)",autopid_log:"Record parameters",can_log:"Record CAN frames",can_format:"File format",
@@ -1310,6 +1311,7 @@ const HELP={
   wake_delay_ms:"How long the battery must stay above the wake-up voltage before the device wakes: 0.1 to 5 s. Longer ignores short spikes such as a door light or a remote unlock; shorter wakes faster.",
   sleep_delay_min:"How long the voltage must stay below the threshold before the device sleeps. Under 11.9 V it sleeps after 5 minutes at the latest, whatever this says.",
   periodic_wakeup:"Wake briefly at a fixed interval while sleeping (for example to report position).",
+  vehicle_on_awake:"Don't sleep on a low battery while the car reports it is on (READY, read from CAN). Some cars hold their 12 V under the sleep voltage while driving. The critical battery floor still applies.",
   pause_below_mv:"Polling stops below this battery voltage and resumes 0.3 V above it. 0 = no fixed threshold.",
   pause_follow_sleep:"With no fixed threshold, pause PID requests whenever the battery is below the Power Saving sleep voltage; they resume above its wake-up voltage.",
   pause_mode:"What a voltage pause stops. Pause requests only: the J1939 rows, read from WiCAN's own CAN listener and transmitting nothing, keep running. Pause everything: those stop too.",
@@ -3076,10 +3078,10 @@ PAGES.power=async(view)=>{
   const p=page(view,null,"Power Saving","Sleep behaviour to protect the vehicle battery.");
   const wrap=h("div",{});p.append(wrap);
   try{const rows=await settingsForm("sleep_manager",null,
-      {advancedExcept:["enabled","sleep_mv","wake_mv","wake_delay_ms","sleep_delay_min","periodic_wakeup","wakeup_interval_min"],
+      {advancedExcept:["enabled","sleep_mv","wake_mv","wake_delay_ms","sleep_delay_min","vehicle_on_awake","periodic_wakeup","wakeup_interval_min"],
        /* progressive disclosure: nothing but the switch while sleep is off;
           the wake-up interval only once periodic wake-up is on */
-       visible:st=>!st.enabled?["enabled"]:(st.periodic_wakeup?null:["enabled","sleep_mv","wake_mv","wake_delay_ms","sleep_delay_min","periodic_wakeup","cli"])});
+       visible:st=>!st.enabled?["enabled"]:(st.periodic_wakeup?null:["enabled","sleep_mv","wake_mv","wake_delay_ms","sleep_delay_min","vehicle_on_awake","periodic_wakeup","cli"])});
     const st=await tryGet("/api/sleep");
     /* meatpi 2026-09-07: anything motion/wake related must be visible here. "Wake on
        motion" (the IMU's bump detector) ships off; when it is on, say so: and say what
