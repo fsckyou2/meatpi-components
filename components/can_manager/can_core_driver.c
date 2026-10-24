@@ -118,10 +118,15 @@ typedef struct
     volatile uint8_t tries;      /* 0 = free; attempts made otherwise      */
     uint32_t         arb_at;     /* s_isr.arb_lost when the attempt went out:
                                     moved = the attempt lost arbitration    */
+    uint32_t         err_at;     /* CAN_DRV_ERRS() then: still = no error   */
 } can_drv_tx_slot_t;
 
 static can_drv_tx_slot_t s_tx[CAN_DRV_TX_SLOTS];
 static portMUX_TYPE      s_tx_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* bus errors seen, lost arbitrations aside */
+#define CAN_DRV_ERRS() (s_isr.err_stuff + s_isr.err_form + s_isr.err_bit \
+                        + s_isr.err_ack + s_isr.err_other)
 
 static bool IRAM_ATTR can_on_rx_done(twai_node_handle_t node,
                                      const twai_rx_done_event_data_t *e,
@@ -206,11 +211,13 @@ bool IRAM_ATTR __wrap_twai_hal_read_rx_fifo(void *hal_ctx, void *rx_frame)
  *  bus, or a bit read back wrong) only CAN_DRV_TX_RETRIES times, because
  *  every such attempt adds 8 to the transmit error counter and a frame
  *  retried for ever on a dead bus parks the node error-passive, then
- *  bus-off. The two are told apart by the arb_lost error event the HAL
- *  raises for the attempt (s_isr.arb_lost moved since it went out); when
- *  that event comes after this one, the attempt counts as an error, which
- *  is the safe side. Bench 2026-10-03 (J1939 active, a 1000 frame/s flood of
- *  priority-0 frames): 2 of 20 requests lost with one budget of 3. */
+ *  bus-off. An arb_lost event since the attempt went out means it lost
+ *  arbitration. That event can arrive after this tx_done, though, so an
+ *  attempt with no bus error event either counts as arbitration too. An
+ *  error whose event is late is taken for arbitration once; its event lands
+ *  before the retry fails, and that one counts as an error. Bench
+ *  2026-10-03 (J1939 active, a 1000 frame/s flood of priority-0 frames): 2
+ *  of 20 requests lost with one budget of 3. */
 static bool IRAM_ATTR can_on_tx_done(twai_node_handle_t node,
                                      const twai_tx_done_event_data_t *ev,
                                      void *ctx)
@@ -233,12 +240,14 @@ static bool IRAM_ATTR can_on_tx_done(twai_node_handle_t node,
             break;
         }
 
-        bool arb = (s_isr.arb_lost != slot->arb_at);
+        bool arb = (s_isr.arb_lost != slot->arb_at)
+                   || (CAN_DRV_ERRS() == slot->err_at);
         uint8_t budget = arb ? CAN_DRV_TX_RETRIES_ARB : CAN_DRV_TX_RETRIES;
 
         if (slot->tries <= budget)
         {
             slot->arb_at = s_isr.arb_lost;
+            slot->err_at = CAN_DRV_ERRS();
 
             if (twai_node_transmit(node, &slot->f, 0) == ESP_OK)
             {
@@ -409,6 +418,7 @@ elm327_err_t can_drv_transmit(const can_core_frame_t *frame,
 
     memset(&slot->f, 0, sizeof(slot->f));
     slot->arb_at = s_isr.arb_lost;
+    slot->err_at = CAN_DRV_ERRS();
     slot->f.header.id  = frame->id;
     slot->f.header.ide = frame->ext ? 1 : 0;
     slot->f.header.rtr = frame->rtr ? 1 : 0;
