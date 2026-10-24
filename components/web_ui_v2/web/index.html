@@ -1368,12 +1368,12 @@ const HELP={
 };
 const ENUMS={
   "precondition.mode":{once:"Once",continuous:"Continuous",persistent:"Persistent"},
-  "precondition.button":{disabled:"Disabled",sw_star:"Star Button (Steering Wheel)",avn_star:"Star Button (Climate Bar)",
-    avn_tuner_in:"Tuner Press (Climate Bar)",avn_vol_in:"Volume Press (Climate Bar)",ev6_avn_setup:"Setup (EV6 Climate Bar)",
+  "precondition.button":{disabled:"Disabled",sw_star:"Star Button (Steering Wheel)",avn_star:"Star Button (Ioniq 5/6 Climate Bar)",
+    avn_tuner_in:"Tuner Press (Ioniq 5/6 Climate Bar)",avn_vol_in:"Volume Press (Ioniq 5/6 Climate Bar)",ev6_avn_setup:"Setup (EV6 Climate Bar)",
     sw_mode:"Mode (Steering Wheel)",sw_speak:"Speak (Steering Wheel)",sw_call:"Call (Steering Wheel)",sw_vol_in:"Volume Press (Steering Wheel)",
     sw_vol_up:"Volume Up (Steering Wheel)",sw_vol_down:"Volume Down (Steering Wheel)",sw_skip_up:"Skip Up (Steering Wheel)",
-    sw_skip_down:"Skip Down (Steering Wheel)",sw_ok:"OK (Steering Wheel)",avn_map:"Map (Climate Bar)",avn_nav:"Nav (Climate Bar)",
-    avn_media:"Media (Climate Bar)",avn_tuner_up:"Tuner Up (Climate Bar)",avn_tuner_down:"Tuner Down (Climate Bar)"},
+    sw_skip_down:"Skip Down (Steering Wheel)",sw_ok:"OK (Ioniq 5/EV6 Steering Wheel)",avn_map:"Map (Ioniq 5/6 Climate Bar)",avn_nav:"Nav (Ioniq 5/6 Climate Bar)",
+    avn_media:"Media (Ioniq 5/6 Climate Bar)",avn_tuner_up:"Tuner Up (Ioniq 5/6 Climate Bar)",avn_tuner_down:"Tuner Down (Ioniq 5/6 Climate Bar)"},
   "precondition.press":{short:"Short Press",long:"Long Press (hold 1s)"},
   "precondition.temp_unit":{c:"\u00b0C",f:"\u00b0F"},
   "fw_update.channel":{stable:"Stable",beta:"Beta (release candidates)",alfa:"Alfa (every test build)"},
@@ -3108,6 +3108,41 @@ PAGES.power=async(view)=>{
    live state from /api/precondition, the start/stop the button in the car
    does, text for the dash popup, and the precondition settings. */
 const PRECON_CARS={ioniq5:"Ioniq 5",ioniq6:"Ioniq 6",ev6:"EV6"};
+/* As the old firmware's page has it: the cars each button is on (not
+   listed: every car), and the buttons shown only on request */
+const PRECON_BUTTON_CARS={avn_star:["ioniq5","ioniq6"],avn_tuner_in:["ioniq5","ioniq6"],avn_vol_in:["ioniq5","ioniq6"],
+  ev6_avn_setup:["ev6"],sw_ok:["ioniq5","ev6"],avn_map:["ioniq5","ioniq6"],avn_nav:["ioniq5","ioniq6"],
+  avn_media:["ioniq5","ioniq6"],avn_tuner_up:["ioniq5","ioniq6"],avn_tuner_down:["ioniq5","ioniq6"]};
+const PRECON_BUTTON_EXTRA=new Set(["sw_mode","sw_speak","sw_call","sw_vol_in","sw_vol_up","sw_vol_down","sw_skip_up",
+  "sw_skip_down","sw_ok","avn_map","avn_nav","avn_media","avn_tuner_up","avn_tuner_down"]);
+/* Narrow the settings form's button list to the identified car, with the
+   extra buttons and the other cars' behind two boxes, and warn when the
+   chosen one isn't on the car: the firmware doesn't check, and such a
+   button never triggers. Only what is shown changes, not the setting.
+   Returns the refilter to call when the car changes. */
+function preconButtonFilter(row,getCar){
+  const sel=row&&row.querySelector("select");
+  if(!sel)return()=>{};
+  const box=t=>{const cb=h("input",{type:"checkbox",onchange:()=>fit()});
+    return [cb,h("label",{style:"display:flex;gap:9px;align-items:center;margin-top:6px;cursor:pointer;font-size:13px"},cb,h("span",{},t))];};
+  const [extra,extraRow]=box("Show extra button options");
+  const [allCars,allCarsRow]=box("Show buttons for all vehicles");
+  const warn=h("div",{style:"display:none;margin-top:6px;font-size:13px;color:var(--warning)"});
+  sel.after(warn,extraRow,allCarsRow);
+  const fits=(v,car)=>!car||!PRECON_BUTTON_CARS[v]||PRECON_BUTTON_CARS[v].includes(car);
+  function fit(){
+    const car=getCar(),shown=allCars.checked?null:car;
+    for(const o of sel.options)
+      o.hidden=!o.selected&&!(fits(o.value,shown)&&(extra.checked||!PRECON_BUTTON_EXTRA.has(o.value)));
+    const o=sel.options[sel.selectedIndex],bad=!!o&&!fits(o.value,car);
+    /* U+FE0E: the text form of the sign, so it takes the warning colour */
+    warn.textContent=bad?"\u26a0\ufe0e "+o.textContent+" is not on the "+PRECON_CARS[car]:"";
+    warn.style.display=bad?"":"none";
+  }
+  sel.addEventListener("change",fit);
+  fit();
+  return fit;
+}
 function preconAge(ms){const s=Math.max(0,Math.round(ms/1000));
   return s<60?s+"s":s<3600?Math.floor(s/60)+"m":Math.floor(s/3600)+"h";}
 function preconTemp(c,unit){return unit==="f"?Math.round(c*9/5+32)+"\u00b0F":c+"\u00b0C";}
@@ -3133,6 +3168,7 @@ PAGES.precondition=async(view)=>{
   async function refresh(){
     const o=await tryGet("/api/precondition");
     if(!o){stateEl.replaceChildren(chip("Unavailable","crit"));return;}
+    if((o.car_model||null)!==car){car=o.car_model||null;fitButtons();}
     stateEl.replaceChildren(
       o.starting?chip("Starting","warn"):o.active?chip("Active","ok"):o.requested?chip("Requested","warn"):chip("Off",""),
       chip(o.car_ready?"Car ready":"Car not ready",o.car_ready?"ok":""));
@@ -3149,7 +3185,10 @@ PAGES.precondition=async(view)=>{
   p.append(card("Status","thermo",stateEl,kvEl,h("div",{style:"margin-top:12px"},toggleBtn)));
   p.append(card("Dash popup","send",h("div",{class:"rowflex",style:"gap:8px"},popupIn,popupBtn)));
   const wrap=h("div",{});p.append(wrap);
-  try{wrap.append(card("Settings","settings",...await settingsForm("precondition",null)));}
+  let car=null,fitButtons=()=>{};
+  try{const rows=await settingsForm("precondition",null);
+    fitButtons=preconButtonFilter(rows.find(r=>r.dataset.key==="button"),()=>car);
+    wrap.append(card("Settings","settings",...rows));}
   catch(e){wrap.append(banner("crit","alert",e.message));}
   await refresh();
   const t=setInterval(()=>{if(conn.state==="online")refresh();},2000);
