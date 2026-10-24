@@ -145,11 +145,12 @@ elm327_err_t can_drv_transmit(const can_core_frame_t *frame,
 #define CAN_DRV_TX_SLOTS       16 /* frames in flight (internal RAM, the ISR
                                      and the HAL read them)               */
 #define CAN_DRV_TX_RETRIES     3  /* attempts after the first, on an error  */
-#define CAN_DRV_TX_RETRIES_ARB 250 /* ... after a lost arbitration. A car
-                                      bus sends in bursts, and a
-                                      low-priority frame loses to every
-                                      frame in one (M-CAN: 16 dropped ~6 %
-                                      of the frames sent)                  */
+#define CAN_DRV_TX_RETRIES_ARB 250 /* ... after a lost arbitration, which
+                                      costs the bus nothing. A car bus sends
+                                      in bursts, and a low-priority frame
+                                      loses to every frame in one: 16 was
+                                      too few on M-CAN. 250 is ~60 ms of
+                                      back-to-back frames at 500 kbit/s    */
 
 /** Take the controller off the bus NOW, without tearing the node down
  *  (no-op while it is down): for the restart path, where the RX task is

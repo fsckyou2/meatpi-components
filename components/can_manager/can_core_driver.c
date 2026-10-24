@@ -116,10 +116,14 @@ typedef struct
     twai_frame_t     f;
     uint8_t          buf[8];
     volatile uint8_t tries;      /* 0 = free; attempts made otherwise      */
-    uint32_t         arb_at;     /* s_isr.arb_lost when the attempt went out:
-                                    moved = the attempt lost arbitration    */
-    uint32_t         err_at;     /* CAN_DRV_ERRS() then: still = no error   */
+    uint32_t         arb_at;     /* s_isr.arb_lost when the attempt went out */
+    uint32_t         err_at;     /* CAN_DRV_ERRS() then; can_on_tx_done
+                                    reads both to tell why it failed      */
 } can_drv_tx_slot_t;
+
+/* tries counts up to CAN_DRV_TX_RETRIES_ARB + 1, and 0 means free */
+_Static_assert(CAN_DRV_TX_RETRIES_ARB < UINT8_MAX,
+               "CAN_DRV_TX_RETRIES_ARB must fit the slot's uint8_t tries");
 
 static can_drv_tx_slot_t s_tx[CAN_DRV_TX_SLOTS];
 static portMUX_TYPE      s_tx_lock = portMUX_INITIALIZER_UNLOCKED;
