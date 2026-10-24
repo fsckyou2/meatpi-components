@@ -64,6 +64,7 @@ typedef struct
     uint32_t delay_ms;       /* LOW_VOLTAGE countdown                  */
     bool     periodic;
     uint32_t interval_ms;    /* periodic check-in while SLEEPING       */
+    bool     vehicle_on;     /* ask the vehicle-on callback (v5 setting) */
 } sm_cfg_t;
 
 typedef struct

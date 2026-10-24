@@ -68,6 +68,9 @@ static const settings_field_t FIELDS[] =
        light, a remote unlock), shorter wakes faster. */
     SETTINGS_INT("wake_delay_ms", 100, 5000, 500),
     SETTINGS_INT("sleep_delay_min", 1, 30, 5),
+    /* no low-voltage sleep while the vehicle-on callback says the vehicle
+       is on; on by default, as preconditioning needs the WiCAN awake */
+    SETTINGS_BOOL("vehicle_on_awake", true),
     SETTINGS_BOOL("periodic_wakeup", false),
     SETTINGS_INT("wakeup_interval_min", 5, 1440, 30),
     SETTINGS_BOOL("cli", true),
@@ -120,6 +123,8 @@ static esp_err_t on_apply(const cJSON *settings)
         (uint32_t)(cJSON_IsNumber(item) ? item->valueint : 5);
     s_cfg.periodic = cJSON_IsTrue(
         cJSON_GetObjectItemCaseSensitive(settings, "periodic_wakeup"));
+    s_cfg.vehicle_on = !cJSON_IsFalse(
+        cJSON_GetObjectItemCaseSensitive(settings, "vehicle_on_awake"));
     item = cJSON_GetObjectItemCaseSensitive(settings,
                                             "wakeup_interval_min");
     s_cfg.interval_ms = 60000u *
@@ -191,6 +196,13 @@ static esp_err_t sleep_settings_migrate(uint32_t from_version, cJSON *settings)
         }
     }
 
+    /* v4 -> v5 (2026-10-24): vehicle_on_awake, on as for a new device */
+    if (from_version < 5 && settings != NULL &&
+        cJSON_GetObjectItemCaseSensitive(settings, "vehicle_on_awake") == NULL)
+    {
+        cJSON_AddBoolToObject(settings, "vehicle_on_awake", true);
+    }
+
     return ESP_OK;
 }
 
@@ -199,7 +211,7 @@ esp_err_t sleep_settings_register(void)
     static const settings_descriptor_t DESC =
     {
         .name = "sleep_manager",
-        .version = 4, /* v2: sane ranges (2026-09-06); v3: wake_mv; v4: wake_delay_ms (2026-10-01) */
+        .version = 5, /* v2: sane ranges (2026-09-06); v3: wake_mv; v4: wake_delay_ms (2026-10-01); v5: vehicle_on_awake (2026-10-24) */
         .fields = FIELDS,
         .field_count = sizeof(FIELDS) / sizeof(FIELDS[0]),
         .on_apply = on_apply,

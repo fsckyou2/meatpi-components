@@ -357,7 +357,8 @@ static void state_task(void *arg)
                 sleep_manager_vehicle_on_cb_t on_cb = s_vehicle_on_cb;
 
                 /* awake only: asleep, the bus that answers it is down */
-                vehicle_on = !in_sleep_states && on_cb != NULL && on_cb();
+                vehicle_on = cfg->vehicle_on && !in_sleep_states &&
+                             on_cb != NULL && on_cb();
 
                 if (vehicle_on)
                 {

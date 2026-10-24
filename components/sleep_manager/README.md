@@ -65,7 +65,8 @@ the ladder starts no countdown and calls off a running one (pure
 `sm_policy_vehicle_on()`, host-tested), with one I line per stretch
 (`the vehicle is on: no sleep at 12.95 V`). The critical floor, the
 boot-loop guard and the wake rules are untouched, and asleep it is not
-asked: the bus that answers it is down. No callback, no change.
+asked: the bus that answers it is down. No callback, or the
+`vehicle_on_awake` setting off, and the battery alone decides.
 
 **The countdown (2026-10-06).** The floor cuts a longer sleep delay
 short, by design, and when it was 2 min a default device on an 11.6 V
@@ -139,7 +140,7 @@ check to keep green when the entry sequence gains another latched pin.
   full entry sequence with a timed wake: the USB-powered bench unit
   (which never sees a "recovered" voltage) always comes back.
 
-## Settings (`sleep_manager`, v4, reboot-to-apply)
+## Settings (`sleep_manager`, v5, reboot-to-apply)
 
 `enabled` (**true**: shipping default ON since 2026-07-18, 5 min delay:
 a parked device must not drain the car battery out of the box),
@@ -148,7 +149,9 @@ a parked device must not drain the car battery out of the box),
 after", how long the battery must stay above `wake_mv` before the wake
 reboot; was a fixed 1 s; the Power Saving page shows it in seconds),
 `sleep_delay_min` (1–30, 5), `periodic_wakeup` (false),
-`wakeup_interval_min` (5–1440, 30), `cli` (true).
+`wakeup_interval_min` (5–1440, 30), `vehicle_on_awake` (true; v5,
+2026-10-24: ask the vehicle-on callback, below; the Power Saving page's
+"Stay awake while the car is on"), `cli` (true).
 
 The wake voltage used to be derived (sleep + 0.1 V, legacy). Since v3 it
 is the user's own number, measured on the car by Quick Setup's "Battery
