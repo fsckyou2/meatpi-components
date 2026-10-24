@@ -175,6 +175,11 @@ esp_err_t sm_storage_save(const char *name, uint32_t version, const cJSON *data)
     return ESP_OK;
 }
 
+bool sm_storage_saved(const char *name)
+{
+    return name != NULL && stub_find(name) != NULL;
+}
+
 bool sm_storage_file_exists(const char *name)
 {
     (void)name;

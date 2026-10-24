@@ -358,6 +358,20 @@ esp_err_t sm_storage_wipe(void)
     return ESP_OK;
 }
 
+bool sm_storage_saved(const char *name)
+{
+    if (name == NULL)
+    {
+        return false;
+    }
+
+    char path[SM_PATH_MAX];
+    build_path(path, sizeof(path), name, ".json");
+
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
 bool sm_storage_file_exists(const char *name)
 {
     if (name == NULL)

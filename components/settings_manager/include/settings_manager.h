@@ -287,6 +287,16 @@ esp_err_t settings_manager_set(const char *name, const cJSON *in,
 bool settings_manager_is_degraded(const char *name);
 
 /**
+ * @brief True if @p name has settings of its own on the settings partition:
+ *        set() has saved them at least once since the last factory reset. A
+ *        component running on its schema defaults reports false. Callable
+ *        from settings_manager_init() on, before start(), so a component can
+ *        seed another's defaults in the window where they still apply this
+ *        boot.
+ */
+bool settings_manager_is_saved(const char *name);
+
+/**
  * @brief True when @p name's PENDING (persisted) object differs from what
  *        on_apply actually ran with at boot, i.e. a reboot is needed for the
  *        saved settings to take effect. Exact: saving values back to the

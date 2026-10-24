@@ -111,6 +111,9 @@ esp_err_t sm_storage_save(const char *name, uint32_t version, const cJSON *data)
 /** @brief True if a referenced file (format:"file") exists on the FS. */
 bool sm_storage_file_exists(const char *name);
 
+/** @brief True if component @p name has a settings file (saved at least once). */
+bool sm_storage_saved(const char *name);
+
 /** @brief Delete EVERY stored settings file (factory reset). */
 esp_err_t sm_storage_wipe(void);
 

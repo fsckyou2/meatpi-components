@@ -385,6 +385,15 @@ bool settings_manager_is_pending_reboot(const char *name)
     return pending;
 }
 
+bool settings_manager_is_saved(const char *name)
+{
+    sm_lock();
+    bool saved = sm_storage_saved(name);
+    sm_unlock();
+
+    return saved;
+}
+
 bool settings_manager_is_degraded(const char *name)
 {
     sm_lock();
