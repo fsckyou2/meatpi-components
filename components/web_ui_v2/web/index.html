@@ -1361,9 +1361,10 @@ const HELP={
   bonding:"Keep pairing keys so a phone reconnects without re-entering the passkey.",
   ip_mode:"Automatic (DHCP) works for almost every network.",
   sta_ip_mode:"Automatic (DHCP) works for almost every network.",
-  "precondition.mode":"Once: precondition until the battery is warm, then stop. Continuous: leave it to the car for the rest of the drive. Persistent: as Continuous, and ask again each time the car is ready.",
+  "precondition.mode":"Once: start it one time; it ends when the car stops it (battery warm, charge low) or turns off. Continuous: keep it going until you stop it or the car turns off, starting it again whenever the battery cools. Persistent: as Continuous, but it carries over when the car turns off and resumes each time the car is ready.",
   "precondition.button":"The button in the car that starts and stops preconditioning.",
   "precondition.press":"Long: hold the button for a second.",
+  "precondition.temp_unit":"For the battery temperature, here and in the popups on the dash.",
 };
 const ENUMS={
   "precondition.mode":{once:"Once",continuous:"Continuous",persistent:"Persistent"},
