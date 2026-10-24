@@ -76,6 +76,32 @@ static void test_recovery_cancels_countdown(void)
     TEST_ASSERT_EQUAL_INT(SLEEP_MANAGER_LOW_VOLTAGE, s_p.state);
 }
 
+static void test_vehicle_on_calls_off_countdown(void)
+{
+    sm_policy_eval(&s_p, &s_cfg, 12.4f, 1000);
+    TEST_ASSERT_EQUAL_INT(SLEEP_MANAGER_LOW_VOLTAGE, s_p.state);
+    /* the vehicle comes on: the countdown is called off */
+    TEST_ASSERT_TRUE(sm_policy_vehicle_on(&s_p));
+    TEST_ASSERT_EQUAL_INT(SLEEP_MANAGER_NORMAL, s_p.state);
+    TEST_ASSERT_FALSE(sm_policy_vehicle_on(&s_p));
+    /* off again: a fresh countdown with the whole delay, not the old one */
+    TEST_ASSERT_EQUAL_INT(SM_ACT_NONE,
+                          sm_policy_eval(&s_p, &s_cfg, 12.4f, 200000));
+    TEST_ASSERT_EQUAL_INT(SM_ACT_NONE,
+                          sm_policy_eval(&s_p, &s_cfg, 12.4f, 379999));
+    TEST_ASSERT_EQUAL_INT(SM_ACT_ENTER_SLEEP,
+                          sm_policy_eval(&s_p, &s_cfg, 12.4f, 380000));
+}
+
+static void test_vehicle_on_leaves_sleep_alone(void)
+{
+    sm_policy_eval(&s_p, &s_cfg, 12.4f, 1000);
+    sm_policy_eval(&s_p, &s_cfg, 12.4f, 181001);
+    TEST_ASSERT_EQUAL_INT(SLEEP_MANAGER_SLEEPING, s_p.state);
+    TEST_ASSERT_FALSE(sm_policy_vehicle_on(&s_p));
+    TEST_ASSERT_EQUAL_INT(SLEEP_MANAGER_SLEEPING, s_p.state);
+}
+
 static void test_stable_recovery_reboots(void)
 {
     sm_policy_eval(&s_p, &s_cfg, 12.4f, 0);
@@ -564,5 +590,7 @@ void app_main(void)
     RUN_TEST(test_hold_moves_both_deadlines);
     RUN_TEST(test_hold_only_what_counts);
     RUN_TEST(test_hold_clock_wrap_safe);
+    RUN_TEST(test_vehicle_on_calls_off_countdown);
+    RUN_TEST(test_vehicle_on_leaves_sleep_alone);
     UNITY_END();
 }

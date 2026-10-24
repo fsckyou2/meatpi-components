@@ -207,6 +207,17 @@ void sm_policy_init(sm_policy_t *p)
     p->t_periodic = 0;
 }
 
+bool sm_policy_vehicle_on(sm_policy_t *p)
+{
+    if (p->state != SLEEP_MANAGER_LOW_VOLTAGE)
+    {
+        return false;
+    }
+
+    p->state = SLEEP_MANAGER_NORMAL;
+    return true;
+}
+
 sm_action_t sm_policy_eval(sm_policy_t *p, const sm_cfg_t *cfg,
                            float volts, uint32_t now_ms)
 {

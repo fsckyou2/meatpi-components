@@ -57,6 +57,16 @@ bar and in the dialog. Bench: the sleep bench presses three times with 30 s
 of the minute left and holds the device to a minute after the last press,
 the fourth refused; one press under the floor with sleep disabled.
 
+**The vehicle on (2026-10-24, the wicant-i-precondition fork).**
+`sleep_manager_set_vehicle_on_cb(cb)` lets one component answer whether
+the vehicle is on, for a car whose 12 V sits under the sleep voltage while
+it runs. The state task asks on every awake pass; while the answer is true
+the ladder starts no countdown and calls off a running one (pure
+`sm_policy_vehicle_on()`, host-tested), with one I line per stretch
+(`the vehicle is on: no sleep at 12.95 V`). The critical floor, the
+boot-loop guard and the wake rules are untouched, and asleep it is not
+asked: the bus that answers it is down. No callback, no change.
+
 **The countdown (2026-10-06).** The floor cuts a longer sleep delay
 short, by design, and when it was 2 min a default device on an 11.6 V
 supply was asleep 2 min after its sleep task armed, with "Sleep after

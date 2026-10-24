@@ -56,6 +56,7 @@ static const char *TAG = "sleep_manager";
 static sm_policy_t s_policy;
 static sm_critical_t s_crit;  /* the critical battery floor tracker */
 static sleep_manager_prepare_cb_t s_prepare_cb;
+static volatile sleep_manager_vehicle_on_cb_t s_vehicle_on_cb;
 static volatile bool s_run;
 static volatile uint32_t s_test_wake_s; /* !=0: forced bench sleep */
 static TaskHandle_t s_task;
@@ -253,6 +254,7 @@ static void state_task(void *arg)
              (unsigned long)(cfg->interval_ms / 60000));
 
     bool guard_tripped = false;
+    bool vehicle_held = false; /* logged for this stretch under sleep_v */
 
     while (true)
     {
@@ -334,6 +336,8 @@ static void state_task(void *arg)
         bool floor_trip = have_v && !in_sleep_states &&
                           sm_critical_eval(&s_crit, volts, now);
         sm_action_t act = SM_ACT_NONE;
+        bool called_off = false;
+        bool vehicle_on = false;
 
         if (floor_trip)
         {
@@ -350,12 +354,37 @@ static void state_task(void *arg)
 
             if (s_run && have_v)
             {
-                act = sm_policy_eval(&s_policy, cfg, volts, now);
+                sleep_manager_vehicle_on_cb_t on_cb = s_vehicle_on_cb;
+
+                /* awake only: asleep, the bus that answers it is down */
+                vehicle_on = !in_sleep_states && on_cb != NULL && on_cb();
+
+                if (vehicle_on)
+                {
+                    called_off = sm_policy_vehicle_on(&s_policy);
+                }
+                else
+                {
+                    act = sm_policy_eval(&s_policy, cfg, volts, now);
+                }
+
                 publish_pending(now); /* the ladder may have armed or cleared */
             }
         }
 
         xSemaphoreGive(s_lock);
+
+        /* one line per stretch the vehicle keeps a low battery awake */
+        if (called_off || (vehicle_on && volts < cfg->sleep_v && !vehicle_held))
+        {
+            vehicle_held = true;
+            ESP_LOGI(TAG, "the vehicle is on: no sleep at %.2f V%s", volts,
+                     called_off ? " (countdown called off)" : "");
+        }
+        else if (!vehicle_on || volts >= cfg->sleep_v)
+        {
+            vehicle_held = false;
+        }
 
         if (floor_trip)
         {
@@ -542,6 +571,12 @@ esp_err_t sleep_manager_status(sleep_manager_status_t *out)
 esp_err_t sleep_manager_set_prepare_cb(sleep_manager_prepare_cb_t cb)
 {
     s_prepare_cb = cb;
+    return ESP_OK;
+}
+
+esp_err_t sleep_manager_set_vehicle_on_cb(sleep_manager_vehicle_on_cb_t cb)
+{
+    s_vehicle_on_cb = cb;
     return ESP_OK;
 }
 

@@ -155,6 +155,10 @@ int sm_migrated_wake_delay_ms(uint32_t from_version, bool present);
 sm_action_t sm_policy_eval(sm_policy_t *p, const sm_cfg_t *cfg,
                            float volts, uint32_t now_ms);
 
+/* the vehicle is on: an awake ladder stays NORMAL, a countdown is called
+ * off (true when one was); the sleep states are left alone */
+bool sm_policy_vehicle_on(sm_policy_t *p);
+
 /* ---- settings (sleep_manager_settings.c) -----------------------------------
  * `sleep_` prefix, not `sm_`: socket_manager already links sm_settings_*. */
 

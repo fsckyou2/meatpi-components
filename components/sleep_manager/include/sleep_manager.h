@@ -118,6 +118,14 @@ typedef struct
  *  task right before the hardware is powered down. */
 typedef void (*sleep_manager_prepare_cb_t)(void);
 
+/** Whether the vehicle is on, from a component that can tell (CAN, say):
+ *  asked on every awake pass. While it answers true, the low-voltage ladder
+ *  starts no countdown and calls off a running one, whatever the battery
+ *  reads, as the wicant-i-precondition firmware's car-off sleep does. The
+ *  critical floor, the boot-loop guard and the wake rules stay as they are.
+ *  Runs on the state task under its lock: answer at once, block on nothing. */
+typedef bool (*sleep_manager_vehicle_on_cb_t)(void);
+
 /** Register descriptors (settings/log/events). No hardware access. */
 esp_err_t sleep_manager_init(void);
 
@@ -131,6 +139,10 @@ esp_err_t sleep_manager_status(sleep_manager_status_t *out);
 
 /** Composition-root glue (ONE callback, main wires it). */
 esp_err_t sleep_manager_set_prepare_cb(sleep_manager_prepare_cb_t cb);
+
+/** The vehicle-on question (ONE callback; NULL: none, the battery alone
+ *  decides). */
+esp_err_t sleep_manager_set_vehicle_on_cb(sleep_manager_vehicle_on_cb_t cb);
 
 /** Keep the device awake for @p minutes more (1..30) on a person's request
  *  (Ali, 2026-10-06): the sleep delay and the critical floor both move out
